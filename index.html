@@ -236,28 +236,45 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
 <div id="screen-join" class="screen">
   <div class="cw">
     <div class="jcard">
-      <div style="width:68px;height:68px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:30px">🎯</div>
-      <h2 style="font-family:'Bebas Neue',cursive;font-size:31px;letter-spacing:2px;margin-bottom:7px;color:var(--gold)">Join the Game</h2>
-      <p style="color:var(--muted);font-size:14px;margin-bottom:20px">Enter the code on the main screen and your name.</p>
-      <div id="jng" style="background:rgba(231,76,60,.07);border:1px solid rgba(231,76,60,.22);border-radius:13px;padding:24px">
+      <div style="width:68px;height:68px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:30px" id="jicon">🎯</div>
+      <h2 style="font-family:'Bebas Neue',cursive;font-size:31px;letter-spacing:2px;margin-bottom:7px;color:var(--gold)" id="jtitle">Join the Game</h2>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:20px" id="jsub">Enter the game code shown on the main screen.</p>
+
+      <!-- Step 0: No game active -->
+      <div id="jstep0" style="background:rgba(231,76,60,.07);border:1px solid rgba(231,76,60,.22);border-radius:13px;padding:24px">
         <div style="font-size:34px;margin-bottom:9px">🚫</div>
         <div style="font-weight:700;font-size:15px;color:var(--danger);margin-bottom:5px">No Active Game</div>
         <div style="font-size:13px;color:var(--muted);line-height:1.6">The host hasn't released a game yet.</div>
       </div>
-      <div id="jform" style="display:none;text-align:left">
+
+      <!-- Step 1: Enter code -->
+      <div id="jstep1" style="display:none;text-align:left">
         <div class="ig">
           <label class="lbl">Game Code</label>
-          <input class="ifield" id="jcode" maxlength="8" placeholder="QZ-XXXX" oninput="this.value=this.value.toUpperCase()" style="font-family:'Space Mono',monospace;font-size:20px;letter-spacing:5px;text-align:center;text-transform:uppercase">
-          <div class="emsg" id="ejcode">Enter the game code.</div>
+          <input class="ifield" id="jcode" maxlength="8" placeholder="QZ-XXXX" oninput="this.value=this.value.toUpperCase()" style="font-family:'Space Mono',monospace;font-size:22px;letter-spacing:6px;text-align:center;text-transform:uppercase" onkeydown="if(event.key==='Enter')doCheckCode()">
+          <div class="emsg" id="ejcode">Please enter the game code.</div>
+          <div class="emsg" id="ejwrong">❌ Code doesn't match. Try again.</div>
+        </div>
+        <button class="btn btn-primary btn-block" style="margin-bottom:9px" onclick="doCheckCode()">Continue →</button>
+        <p style="text-align:center;font-size:12px;color:var(--muted)">No app needed — works in any browser</p>
+      </div>
+
+      <!-- Step 2: Enter name -->
+      <div id="jstep2" style="display:none;text-align:left">
+        <div style="background:rgba(91,76,255,.08);border:1px solid rgba(91,76,255,.25);border-radius:11px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">
+          <span style="font-size:20px">✅</span>
+          <div>
+            <div style="font-size:12px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600">Code Accepted</div>
+            <div id="j2code" style="font-family:'Space Mono',monospace;font-size:16px;color:var(--gold);letter-spacing:3px"></div>
+          </div>
         </div>
         <div class="ig">
           <label class="lbl">Your Name</label>
-          <input class="ifield" id="jname" placeholder="What should we call you?">
-          <div class="emsg" id="ejname">Enter your name.</div>
+          <input class="ifield" id="jname" placeholder="What should we call you?" onkeydown="if(event.key==='Enter')doJoin()">
+          <div class="emsg" id="ejname">Please enter your name.</div>
         </div>
-        <div class="emsg" id="ejwrong" style="text-align:center;margin-bottom:12px;font-size:13px">❌ Code doesn't match. Try again.</div>
-        <button class="btn btn-primary btn-block" style="margin-bottom:9px" onclick="doJoin()">🚀 Join Game</button>
-        <p style="text-align:center;font-size:12px;color:var(--muted)">No app needed — works in any browser</p>
+        <button class="btn btn-primary btn-block" style="margin-bottom:9px" onclick="doJoin()">🚀 Enter Lobby</button>
+        <button class="btn btn-ghost btn-block btn-sm" onclick="renderJoin()">← Back</button>
       </div>
     </div>
   </div>
@@ -333,7 +350,7 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
 
 <!-- PROJECTOR -->
 <div id="screen-projector" class="screen">
-  <div class="proj-screen" id="proj"></div>
+  <div id="proj" style="position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden"></div>
 </div>
 
 <!-- ADMIN -->
@@ -401,7 +418,8 @@ const DC={easy:'var(--safe)',mixed:'#5DADE2',medium:'#5DADE2',hard:'var(--danger
 let S={
   ain:false, gon:false, gc:null, aq:null,
   players:[], me:null,
-  quizzes:[], eqid:null, eqs:[], eqi:-1, qf:'all'
+  quizzes:[], eqid:null, eqs:[], eqi:-1, qf:'all',
+  curQ:0, paused:false, revealAns:false, curStep:70
 };
 function uid(){return 'q'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
 function mkc(){const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='QZ-';for(let i=0;i<4;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
@@ -537,16 +555,24 @@ function releaseGame(){
   const q=S.quizzes.find(z=>z.id===sel.value);
   if(!q)return;
   S.gon=true;S.gc=mkc();S.aq=q;S.players=[];
+  S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=70;
   renderOverview();renderProj();
   toast('Game released! Code: '+S.gc,'ok');
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
   S.gon=false;S.gc=null;S.aq=null;S.players=[];S.me=null;
+  S.curQ=0;S.paused=false;S.revealAns=false;
   document.getElementById('tlobby').disabled=true;
   document.getElementById('tgame').disabled=true;
-  renderOverview();renderProj();
+  renderOverview();renderProj();renderSession();
   toast('Session ended.','nf');
+}
+function adjScore(playerIdx, delta){
+  if(!S.players[playerIdx])return;
+  S.players[playerIdx].score=(S.players[playerIdx].score||0)+delta;
+  renderProj();renderScores();
+  toast(x(S.players[playerIdx].name)+': '+(delta>0?'+':'')+delta+' pts','nf');
 }
 
 // ═══ QUIZ LIBRARY ═══
@@ -723,6 +749,7 @@ function relFromLib(id){
   if(S.gon){toast('End the current session first.','er');return;}
   const q=S.quizzes.find(z=>z.id===id);if(!q)return;
   S.gon=true;S.gc=mkc();S.aq=q;S.players=[];
+  S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=70;
   aTab('overview',document.querySelectorAll('.anav')[0]);
   renderProj();
   toast('Game released! Code: '+S.gc,'ok');
@@ -734,13 +761,27 @@ function renderSession(){
   if(!S.gon){
     h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">🎛️</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Active Session</div><div style="font-size:14px;margin-bottom:15px">Release a game from Overview first.</div><button class="btn btn-primary btn-sm" onclick="aTab(\'overview\',document.querySelectorAll(\'.anav\')[0])">Go to Overview →</button></div>';
   } else {
+    const totalQ=S.aq.questions?S.aq.questions.length:0;
+    const curQ=S.curQ||0;
+    const fq=S.aq.questions&&S.aq.questions[curQ];
     h+='<div style="background:var(--card);border:2px solid rgba(231,76,60,.3);border-radius:14px;padding:18px;margin-bottom:15px">';
     h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><span class="tag tr" style="animation:pulse 2s infinite">● LIVE</span><span style="font-size:16px;font-weight:600">'+x(S.aq.title)+'</span><span style="margin-left:auto;font-family:\'Space Mono\',monospace;font-size:13px;color:var(--gold)">'+x(S.gc)+'</span></div>';
-    h+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px"><button class="btn btn-primary btn-sm" style="justify-content:center">▶ Next</button><button class="btn btn-outline btn-sm" style="justify-content:center">⏸ Pause</button><button class="btn btn-danger btn-sm" style="justify-content:center" onclick="endGame()">⏹ End</button></div></div>';
-    const fq=S.aq.questions&&S.aq.questions[0];
+    // Progress bar
+    h+='<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:6px"><span>Question '+(curQ+1)+' of '+totalQ+'</span><span style="color:'+(S.paused?'var(--warn)':'var(--safe)')+'">'+( S.paused?'⏸ PAUSED':'▶ PLAYING')+'</span></div><div style="height:6px;background:var(--panel);border-radius:3px;overflow:hidden"><div style="height:100%;width:'+(totalQ>0?Math.round(((curQ+1)/totalQ)*100):0)+'%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:3px;transition:width .4s"></div></div></div>';
+    // Control buttons
+    h+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">';
+    h+='<button class="btn btn-primary btn-sm" style="justify-content:center" onclick="sessionNext()" '+(curQ>=totalQ-1?'disabled':'')+'>▶ Next Q</button>';
+    h+='<button class="btn btn-outline btn-sm" style="justify-content:center;border-color:'+(S.paused?'var(--safe)':'var(--warn)')+';color:'+(S.paused?'var(--safe)':'var(--warn)')+'" onclick="sessionPause()">'+(S.paused?'▶ Resume':'⏸ Pause')+'</button>';
+    h+='<button class="btn btn-danger btn-sm" style="justify-content:center" onclick="endGame()">⏹ End</button>';
+    h+='</div></div>';
+    // Reveal answer toggle
+    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between">';
+    h+='<div><div style="font-size:14px;font-weight:600">Reveal Correct Answer</div><div style="font-size:12px;color:var(--muted)">Highlights the correct answer on the projector</div></div>';
+    h+='<button class="btn btn-sm '+(S.revealAns?'btn-safe':'btn-ghost')+'" onclick="toggleReveal()">'+(S.revealAns?'✅ Shown':'👁 Reveal')+'</button>';
+    h+='</div>';
     if(fq){
       h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px">';
-      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">Q1 Preview</div>';
+      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">Q'+(curQ+1)+' Preview</div>';
       h+='<div style="font-size:14px;font-weight:600;margin-bottom:11px">'+x(fq.text)+'</div>';
       h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
       fq.answers.forEach((a,i)=>{const c=i===fq.correct;h+='<div style="padding:7px 11px;background:'+(c?'rgba(46,204,113,.1)':'var(--panel)')+';border-radius:8px;font-size:12px;border:1px solid '+(c?'var(--safe)':'var(--border)')+';color:'+(c?'var(--safe)':'var(--text)')+'">'+['A','B','C','D'][i]+': '+x(a)+'</div>';});
@@ -748,8 +789,42 @@ function renderSession(){
     } else {
       h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:22px;text-align:center;color:var(--muted)">This quiz has no questions yet.</div>';
     }
+    // Score adjustments (if multiplayer)
+    if(S.players.length>1){
+      h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px">';
+      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:12px">Manual Score Adjustments</div>';
+      S.players.forEach((p,i)=>{
+        h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:9px"><div class="player-avi" style="width:30px;height:30px;font-size:14px">'+p.emoji+'</div><div style="flex:1;font-size:14px;font-weight:600">'+x(p.name)+'</div>';
+        h+='<button class="btn btn-xs btn-danger" onclick="adjScore('+i+',-10)">−10</button>';
+        h+='<span style="font-family:\'Space Mono\',monospace;font-size:14px;color:var(--gold);min-width:50px;text-align:center">'+(p.score||0)+' pts</span>';
+        h+='<button class="btn btn-xs btn-safe" onclick="adjScore('+i+',10)">+10</button>';
+        h+='</div>';
+      });
+      h+='</div>';
+    }
   }
   document.getElementById('ap-session').innerHTML=h;
+}
+function sessionNext(){
+  if(!S.gon)return;
+  const totalQ=S.aq.questions?S.aq.questions.length:0;
+  if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;}
+  else{toast('Last question reached.','nf');return;}
+  // Update curStep on ladder
+  const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
+  S.curStep=steps[S.curQ]||steps[steps.length-1];
+  renderSession();renderProj();
+  toast('Moved to Q'+(S.curQ+1),'ok');
+}
+function sessionPause(){
+  S.paused=!S.paused;
+  renderSession();
+  toast(S.paused?'Game paused.':'Game resumed.','nf');
+}
+function toggleReveal(){
+  S.revealAns=!S.revealAns;
+  renderSession();renderProj();
+  toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
 
 // ═══ CAMERAS ═══
@@ -778,17 +853,23 @@ function setMain(card,name){document.querySelectorAll('.fcard').forEach(c=>c.cla
 // ═══ LEADERBOARD ═══
 function renderScores(){
   let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px"><div class="ptitle" style="margin-bottom:0">Leaderboard</div><span class="tag tg">● Live</span></div>';
-  if(!S.gon){
-    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">🏆</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Scores Yet</div><div style="font-size:14px">Scores appear once a game is in progress.</div></div>';
+  if(!S.gon||!S.players.length){
+    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">🏆</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Scores Yet</div><div style="font-size:14px">Scores appear once players have joined.</div></div>';
   } else {
-    [['🧑‍💼','Alex K.',60,46,'Q7/15','HOT SEAT'],['👩‍🦱','Maria D.',50,33,'Q5/15',null],['🧔','James T.',40,26,'Q4/15',null]].forEach(([av,nm,pts,pct,prog,badge],i)=>{
-      const rc=['var(--gold)','#A8B0C0','#CD7F32'][i];
+    const sorted=[...S.players].sort((a,b)=>(b.score||0)-(a.score||0));
+    const maxScore=Math.max(...sorted.map(p=>p.score||0),1);
+    sorted.forEach((p,i)=>{
+      const rc=['var(--gold)','#A8B0C0','#CD7F32'][i]||'var(--muted)';
+      const pct=Math.round(((p.score||0)/maxScore)*100);
       h+='<div class="lbrow"><div class="lbrank" style="color:'+rc+'">'+(i+1)+'</div>';
-      h+='<div style="width:33px;height:33px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">'+av+'</div>';
-      h+='<div style="flex:1"><div style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:6px">'+x(nm)+(badge?'<span class="tag tr" style="font-size:10px">'+badge+'</span>':'')+'</div>';
-      h+='<div style="font-size:11px;color:var(--muted);margin-top:1px">'+prog+'</div>';
+      h+='<div style="width:33px;height:33px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">'+p.emoji+'</div>';
+      h+='<div style="flex:1"><div style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:6px">'+x(p.name)+(i===0&&sorted.length>1?'<span class="tag tr" style="font-size:10px">LEADING</span>':'')+'</div>';
+      h+='<div style="font-size:11px;color:var(--muted);margin-top:1px">Q'+(S.curQ+1)+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
       h+='<div style="height:4px;background:var(--panel);border-radius:2px;margin-top:5px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,var(--accent),var(--gold));border-radius:2px"></div></div></div>';
-      h+='<div style="font-family:\'Space Mono\',monospace;font-size:16px;color:var(--gold);font-weight:700">'+pts+' pts</div></div>';
+      h+='<div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px">';
+      h+='<div style="font-family:\'Space Mono\',monospace;font-size:16px;color:var(--gold);font-weight:700">'+(p.score||0)+' pts</div>';
+      h+='<div style="display:flex;gap:4px"><button class="btn btn-xs btn-danger" onclick="adjScore('+S.players.indexOf(p)+',-10)">−10</button><button class="btn btn-xs btn-safe" onclick="adjScore('+S.players.indexOf(p)+',10)">+10</button></div>';
+      h+='</div></div>';
     });
   }
   document.getElementById('ap-scores').innerHTML=h;
@@ -819,21 +900,42 @@ function renderArch(){
 
 // ═══ JOIN ═══
 function renderJoin(){
-  document.getElementById('jng').style.display=S.gon?'none':'block';
-  document.getElementById('jform').style.display=S.gon?'block':'none';
-  if(S.gon) document.getElementById('jcode').value=S.gc;
-  ['ejcode','ejname','ejwrong'].forEach(hideE);
+  const s0=document.getElementById('jstep0');
+  const s1=document.getElementById('jstep1');
+  const s2=document.getElementById('jstep2');
+  const sub=document.getElementById('jsub');
+  s0.style.display='none'; s1.style.display='none'; s2.style.display='none';
+  if(!S.gon){
+    s0.style.display='block';
+    sub.textContent='The host controls when a game starts.';
+  } else {
+    s1.style.display='block';
+    sub.textContent='Enter the game code shown on the main screen.';
+    const jc=document.getElementById('jcode');
+    if(jc) jc.value='';
+    ['ejcode','ejwrong'].forEach(hideE);
+  }
+}
+function doCheckCode(){
+  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase();
+  hideE('ejcode'); hideE('ejwrong');
+  if(!code){showE('ejcode');return;}
+  if(!S.gon||code!==S.gc){showE('ejwrong');return;}
+  // Move to step 2
+  document.getElementById('jstep1').style.display='none';
+  document.getElementById('jstep2').style.display='block';
+  document.getElementById('j2code').textContent=code;
+  document.getElementById('jsub').textContent='Almost there — tell us your name!';
+  const jn=document.getElementById('jname');
+  if(jn){jn.value='';jn.focus();}
+  hideE('ejname');
 }
 function doJoin(){
-  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase();
+  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase()||S.gc;
   const pname=(document.getElementById('jname')||{value:''}).value.trim();
-  ['ejcode','ejname','ejwrong'].forEach(hideE);
-  let ok=true;
-  if(!code){showE('ejcode');ok=false;}
-  if(!pname){showE('ejname');ok=false;}
-  if(!ok)return;
-  if(!S.gon||code!==S.gc){showE('ejwrong');return;}
-  S.players.push({name:pname,emoji:EMOJ[S.players.length%EMOJ.length]});
+  hideE('ejname');
+  if(!pname){showE('ejname');return;}
+  S.players.push({name:pname,emoji:EMOJ[S.players.length%EMOJ.length],score:0});
   S.me=pname;
   document.getElementById('tlobby').disabled=false;
   document.getElementById('tgame').disabled=false;
@@ -855,30 +957,77 @@ function renderLobby(){
 function renderProj(){
   const el=document.getElementById('proj');
   if(!S.gon){
-    el.style.gridTemplateColumns='1fr';
-    el.innerHTML='<div style="grid-column:1/-1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:60px"><div style="font-size:70px;opacity:.2;margin-bottom:18px">📺</div><div style="font-family:\'Bebas Neue\',cursive;font-size:40px;letter-spacing:4px;color:rgba(255,255,255,.17);margin-bottom:10px">WAITING FOR HOST</div><div style="color:rgba(255,255,255,.14);font-size:16px">Admin hasn\'t released a game yet.</div></div>';
+    el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:60px';
+    el.innerHTML='<div style="font-size:70px;opacity:.2;margin-bottom:18px">📺</div><div style="font-family:\'Bebas Neue\',cursive;font-size:40px;letter-spacing:4px;color:rgba(255,255,255,.17);margin-bottom:10px">WAITING FOR HOST</div><div style="color:rgba(255,255,255,.14);font-size:16px">Admin hasn\'t released a game yet.</div>';
     return;
   }
-  el.style.gridTemplateColumns='240px 1fr 185px';
-  const tp=S.players[0], qd=S.aq.questions&&S.aq.questions[0];
+
+  const mp=S.players.length;
+  const qd=S.aq.questions&&S.aq.questions[S.curQ||0];
+  const isMulti=mp>1;
+
+  el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;';
   let h='';
-  h+='<div style="background:#0a0a12;border:2px solid rgba(245,200,66,.28);border-radius:16px;overflow:hidden;display:flex;flex-direction:column">';
-  h+='<div style="flex:1;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:68px;min-height:210px;position:relative">'+(tp?tp.emoji:'🎭')+'<div style="position:absolute;top:8px;left:8px;background:var(--danger);color:#fff;font-size:9px;font-family:\'Space Mono\',monospace;padding:3px 8px;border-radius:20px;animation:pulse 2s infinite">● LIVE</div></div>';
-  h+='<div style="padding:11px 14px;border-top:2px solid rgba(245,200,66,.18)"><div style="font-family:\'Bebas Neue\',cursive;font-size:20px;color:var(--gold);letter-spacing:2px">'+(tp?x(tp.name):'Waiting…')+'</div><div style="font-size:11px;color:var(--muted);font-family:\'Space Mono\',monospace;margin-top:2px">Q1/'+(S.aq.questions?S.aq.questions.length:0)+' · 60 pts</div></div></div>';
-  h+='<div style="display:flex;flex-direction:column;justify-content:center;gap:13px">';
-  h+='<div style="background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:18px;padding:26px;text-align:center">';
-  h+='<div style="font-family:\'Space Mono\',monospace;color:var(--gold);font-size:12px;margin-bottom:13px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q1</div>';
-  h+='<div style="font-size:clamp(16px,1.9vw,23px);font-weight:500;line-height:1.4;color:#fff">'+(qd?x(qd.text):'Waiting for first question…')+'</div></div>';
-  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
-  (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{h+='<div style="background:rgba(255,255,255,.04);border:2px solid '+(i===1?'rgba(245,200,66,.4)':'rgba(255,255,255,.1)')+';border-radius:12px;padding:14px 16px;display:flex;align-items:center;gap:10px"><div style="width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,.06);display:flex;align-items:center;justify-content:center;font-family:\'Bebas Neue\',cursive;font-size:18px;color:var(--gold);flex-shrink:0">'+['A','B','C','D'][i]+'</div><div style="font-size:14px;color:#fff;font-weight:500">'+x(a)+'</div></div>';});
-  h+='</div></div>';
-  h+='<div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:15px;padding:10px;overflow-y:auto">';
-  h+='<div style="font-family:\'Bebas Neue\',cursive;font-size:14px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:7px">LADDER</div>';
-  [150,140,130,120,110,100,90,80,70,60,50,40,30,20,10].forEach((v,i)=>{
-    const cur=v===150,sf=[100,50].includes(v);
-    h+='<div style="display:flex;justify-content:space-between;padding:4px 7px;border-radius:5px;margin-bottom:2px;font-family:\'Space Mono\',monospace;font-size:10px;background:'+(cur?'rgba(245,200,66,.15)':'transparent')+';border:'+(cur?'1px solid rgba(245,200,66,.4)':'1px solid transparent')+';color:'+(cur?'var(--gold)':sf?'var(--safe)':'rgba(255,255,255,.28)')+'"><span>'+(sf?'🛡 ':'')+'Q'+(15-i)+'</span><span>'+v+'</span></div>';
-  });
-  h+='</div>';
+
+  if(!isMulti){
+    // ── SINGLE PLAYER: full-screen video bg + overlay ──
+    const tp=S.players[0]||{emoji:'🎭',name:'Waiting…',score:0};
+    h+='<!-- Full-screen video background -->';
+    h+='<div style="position:absolute;inset:0;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:180px;opacity:.55">'+tp.emoji+'</div>';
+    h+='<div style="position:absolute;top:14px;left:14px;background:var(--danger);color:#fff;font-size:10px;font-family:\'Space Mono\',monospace;padding:4px 10px;border-radius:20px;animation:pulse 2s infinite;z-index:10">● LIVE</div>';
+    h+='<div style="position:absolute;top:14px;right:14px;background:rgba(0,0,0,.55);border:1px solid rgba(245,200,66,.3);border-radius:11px;padding:7px 14px;z-index:10"><div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase">Player</div><div style="font-family:\'Bebas Neue\',cursive;font-size:22px;color:var(--gold);letter-spacing:2px">'+x(tp.name)+'</div></div>';
+    // Ladder — foreground right side
+    h+='<div style="position:absolute;top:80px;right:14px;bottom:220px;width:160px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.08);border-radius:15px;padding:10px;overflow-y:auto;z-index:20">';
+    h+='<div style="font-family:\'Bebas Neue\',cursive;font-size:14px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:7px">LADDER</div>';
+    const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10], sf=[100,50], curStep=S.curStep||70;
+    steps.forEach((v,i)=>{
+      const cur=v===curStep,safe=sf.includes(v);
+      h+='<div style="display:flex;justify-content:space-between;padding:4px 7px;border-radius:5px;margin-bottom:2px;font-family:\'Space Mono\',monospace;font-size:10px;background:'+(cur?'rgba(245,200,66,.15)':'transparent')+';border:'+(cur?'1px solid rgba(245,200,66,.4)':'1px solid transparent')+';color:'+(cur?'var(--gold)':safe?'var(--safe)':'rgba(255,255,255,.35)')+'"><span>'+(safe?'🛡 ':'')+'Q'+(15-i)+'</span><span>'+v+'</span></div>';
+    });
+    h+='</div>';
+    // Question box — foreground centre-bottom
+    h+='<div style="position:absolute;bottom:14px;left:14px;right:190px;z-index:20">';
+    h+='<div style="background:rgba(0,0,0,.82);border:2px solid rgba(91,76,255,.4);border-radius:18px;padding:20px 24px;backdrop-filter:blur(8px)">';
+    h+='<div style="font-family:\'Space Mono\',monospace;color:var(--gold);font-size:11px;margin-bottom:10px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+    h+='<div style="font-size:clamp(15px,1.8vw,21px);font-weight:500;line-height:1.45;color:#fff;margin-bottom:14px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px">';
+    (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{h+='<div style="background:rgba(255,255,255,.07);border:2px solid '+(S.revealAns&&qd&&i===qd.correct?'rgba(46,204,113,.7)':'rgba(255,255,255,.12)')+';border-radius:11px;padding:11px 14px;display:flex;align-items:center;gap:9px;transition:all .4s"><div style="width:28px;height:28px;border-radius:7px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-family:\'Bebas Neue\',cursive;font-size:17px;color:var(--gold);flex-shrink:0">'+['A','B','C','D'][i]+'</div><div style="font-size:13px;color:#fff;font-weight:500">'+x(a)+'</div></div>';});
+    h+='</div></div></div>';
+  } else {
+    // ── MULTI PLAYER: quarters video + question bar bottom ──
+    const quad=[[0,0],[1,0],[0,1],[1,1]];
+    const shown=S.players.slice(0,4);
+    h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;">';
+    shown.forEach((p,i)=>{
+      const score=p.score||0;
+      h+='<div style="position:relative;background:linear-gradient(160deg,'+(i%2===0?'#12122a,#0a0a1a':'#1a1228,#0d0d20')+';display:flex;align-items:center;justify-content:center;font-size:90px;border:'+(i===0?'2px solid rgba(245,200,66,.3)':'1px solid rgba(255,255,255,.06)')+'">';
+      h+=p.emoji;
+      h+='<div style="position:absolute;top:10px;left:10px;background:var(--danger);color:#fff;font-size:9px;font-family:\'Space Mono\',monospace;padding:3px 8px;border-radius:20px;animation:pulse 2s infinite">● LIVE</div>';
+      h+='<div style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:4px 10px"><div style="font-family:\'Bebas Neue\',cursive;font-size:15px;color:var(--gold);letter-spacing:1px">'+x(p.name)+'</div></div>';
+      // Score + admin +/- controls
+      h+='<div style="position:absolute;bottom:10px;right:10px;display:flex;align-items:center;gap:6px">';
+      if(S.ain){
+        h+='<button onclick="adjScore('+i+',-10)" style="width:26px;height:26px;border-radius:6px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.2);color:#fff;font-size:14px;cursor:pointer;font-weight:700;display:flex;align-items:center;justify-content:center">−</button>';
+        h+='<button onclick="adjScore('+i+',10)" style="width:26px;height:26px;border-radius:6px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.2);color:#fff;font-size:14px;cursor:pointer;font-weight:700;display:flex;align-items:center;justify-content:center">+</button>';
+      }
+      h+='<div style="background:rgba(0,0,0,.75);border:1px solid rgba(245,200,66,.4);border-radius:9px;padding:5px 12px;font-family:\'Space Mono\',monospace;font-size:18px;font-weight:700;color:var(--gold)">'+score+' pts</div>';
+      h+='</div>';
+      h+='</div>';
+    });
+    // Fill empty slots if < 4
+    for(let i=shown.length;i<4;i++){
+      h+='<div style="background:#0a0a14;border:1px solid rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.1);font-size:18px">Waiting…</div>';
+    }
+    h+='</div>';
+    // Question bar bottom overlay
+    h+='<div style="position:absolute;bottom:0;left:0;right:0;z-index:20;background:rgba(0,0,0,.88);border-top:2px solid rgba(91,76,255,.4);padding:14px 20px;backdrop-filter:blur(10px)">';
+    h+='<div style="display:flex;align-items:flex-start;gap:16px">';
+    h+='<div style="flex:1"><div style="font-family:\'Space Mono\',monospace;color:var(--gold);font-size:11px;margin-bottom:6px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+    h+='<div style="font-size:clamp(14px,1.6vw,19px);font-weight:600;color:#fff;margin-bottom:10px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+    h+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">';
+    (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{h+='<div style="background:rgba(255,255,255,.07);border:2px solid '+(S.revealAns&&qd&&i===qd.correct?'rgba(46,204,113,.7)':'rgba(255,255,255,.12)')+';border-radius:10px;padding:9px 12px;display:flex;align-items:center;gap:7px"><div style="width:24px;height:24px;border-radius:6px;background:rgba(255,255,255,.1);display:flex;align-items:center;justify-content:center;font-family:\'Bebas Neue\',cursive;font-size:14px;color:var(--gold);flex-shrink:0">'+['A','B','C','D'][i]+'</div><div style="font-size:12px;color:#fff;font-weight:500">'+x(a)+'</div></div>';});
+    h+='</div></div></div></div>';
+  }
   el.innerHTML=h;
 }
 
