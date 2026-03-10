@@ -7,28 +7,20 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <script type="module">
 // ─── FIREBASE REALTIME DATABASE ───────────────────────────────────────────
-// Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
+// Free tier: 1GB storage, 10GB/month transfer, 100 simultaneous connections
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, set, onValue, update, remove, get }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "AIzaSyAHzOFMSjWelS2llpZVh4Ts83mD9qe10m4",
-  authDomain: "game-night-808f1.firebaseapp.com",
-  databaseURL: "https://game-night-808f1-default-rtdb.firebaseio.com",
-  projectId: "game-night-808f1",
-  storageBucket: "game-night-808f1.firebasestorage.app",
-  messagingSenderId: "730427931065",
-  appId: "1:730427931065:web:f94ae3ac0b52bea1019e68",
-  measurementId: "G-SENJVBZW37"
+  apiKey:            "AIzaSyDemo-QuizStage-ReplaceWithYours",
+  authDomain:        "quizstage-demo.firebaseapp.com",
+  databaseURL:       "https://quizstage-demo-default-rtdb.firebaseio.com",
+  projectId:         "quizstage-demo",
+  storageBucket:     "quizstage-demo.appspot.com",
+  messagingSenderId: "000000000000",
+  appId:             "1:000000000000:web:0000000000000000000000"
 };
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
 
 // ─── INSTRUCTIONS ────────────────────────────────────────────────────────────
 // 1. Go to https://console.firebase.google.com → Create a free project
@@ -256,10 +248,56 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
 .anode.hl{border-color:var(--accent);color:var(--accent);}
 .anode.gld{border-color:var(--gold);color:var(--gold);}
 .anode.grn{border-color:var(--safe);color:var(--safe);}
+
+/* ── Floating Admin Control Bar ── */
+#admin-float-bar{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  z-index:999;
+  background:rgba(10,10,20,.92);
+  border:1px solid rgba(91,76,255,.5);
+  border-radius:16px;padding:10px 16px;
+  backdrop-filter:blur(16px);
+  box-shadow:0 8px 40px rgba(0,0,0,.6),0 0 0 1px rgba(91,76,255,.15);
+  display:none;align-items:center;gap:10px;flex-wrap:wrap;
+}
+#admin-float-bar.visible{display:flex;}
+.afb-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;padding-right:8px;border-right:1px solid var(--border);white-space:nowrap;}
+.afb-btn{padding:7px 14px;border-radius:9px;border:none;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;transition:all .18s;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+.afb-next{background:var(--accent);color:#fff;}
+.afb-next:hover{background:#6B5FFF;}
+.afb-next:disabled{opacity:.35;cursor:not-allowed;}
+.afb-pause{background:rgba(243,156,18,.15);color:var(--warn);border:1px solid rgba(243,156,18,.35);}
+.afb-pause:hover{background:rgba(243,156,18,.28);}
+.afb-reveal{background:rgba(46,204,113,.12);color:var(--safe);border:1px solid rgba(46,204,113,.3);}
+.afb-reveal:hover{background:rgba(46,204,113,.25);}
+.afb-end{background:rgba(231,76,60,.15);color:var(--danger);border:1px solid rgba(231,76,60,.3);}
+.afb-end:hover{background:rgba(231,76,60,.28);}
+.afb-qnum{font-family:'Space Mono',monospace;font-size:12px;color:var(--gold);background:rgba(245,200,66,.1);border:1px solid rgba(245,200,66,.2);border-radius:7px;padding:5px 10px;white-space:nowrap;}
+.afb-sep{width:1px;height:24px;background:var(--border);flex-shrink:0;}
+
+/* ── WebRTC / video ── */
+video{background:#000;}
+.proj-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;}
+.proj-overlay{position:relative;z-index:10;}
+.vid-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.45;z-index:1;}
 </style>
 </head>
 <body>
 <div class="toast-wrap" id="tw"></div>
+
+<!-- FLOATING ADMIN CONTROL BAR -->
+<div id="admin-float-bar">
+  <span class="afb-label">🎛️ ADMIN</span>
+  <span class="afb-qnum" id="afb-qnum">Q1/1</span>
+  <div class="afb-sep"></div>
+  <button class="afb-btn afb-next" id="afb-next" onclick="sessionNext()">▶ Next Q</button>
+  <button class="afb-btn afb-pause" id="afb-pause" onclick="sessionPause()">⏸ Pause</button>
+  <button class="afb-btn afb-reveal" id="afb-reveal" onclick="toggleReveal()">👁 Reveal</button>
+  <div class="afb-sep"></div>
+  <div id="afb-scores" style="display:none;align-items:center;gap:6px;flex-wrap:wrap;"></div>
+  <div class="afb-sep" id="afb-scores-sep" style="display:none"></div>
+  <button class="afb-btn afb-end" onclick="endGame()">⏹ End Game</button>
+</div>
 
 <nav class="top-nav">
   <div class="logo">Quiz<span>Stage</span></div>
@@ -269,6 +307,7 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
     <button class="nav-tab" id="tlobby" onclick="go('lobby')" disabled>⏳ Lobby</button>
     <button class="nav-tab" id="tgame" onclick="go('game')" disabled>⚡ Gameplay</button>
     <button class="nav-tab" onclick="go('projector')">📺 Projector</button>
+    <button class="nav-tab" onclick="go('camera')">📷 Camera</button>
     <button class="nav-tab" onclick="adminEntry()">⚙️ Admin</button>
   </div>
   <div id="achip" style="display:none;align-items:center;gap:9px;">
@@ -428,6 +467,106 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
 <!-- PROJECTOR -->
 <div id="screen-projector" class="screen">
   <div id="proj" style="position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden"></div>
+</div>
+
+<!-- CAMERA DEVICE SCREEN -->
+<div id="screen-camera" class="screen">
+  <div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f 0%,#0d0c1e 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;position:relative;overflow:hidden">
+
+    <!-- subtle grid bg -->
+    <div style="position:absolute;inset:0;background-image:linear-gradient(rgba(91,76,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(91,76,255,.04) 1px,transparent 1px);background-size:44px 44px;pointer-events:none"></div>
+
+    <!-- ── STEP 1: Enter game code ── -->
+    <div id="cam-step-code" style="text-align:center;max-width:460px;width:100%;position:relative">
+      <div style="font-size:52px;margin-bottom:14px">📹</div>
+      <div style="font-family:'Bebas Neue',cursive;font-size:40px;letter-spacing:3px;color:var(--gold);margin-bottom:6px">Camera Device</div>
+      <div style="font-size:14px;color:rgba(255,255,255,.45);line-height:1.7;margin-bottom:28px">
+        Open this page on a <strong style="color:rgba(255,255,255,.8)">separate phone, tablet, or laptop</strong>
+        that will be pointed at the contestant — not the device they're playing on.
+      </div>
+
+      <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:26px;text-align:left;margin-bottom:18px">
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:10px;display:block">Game Code</label>
+        <input id="cam-code-input" class="ifield" maxlength="8" placeholder="QZ-XXXX"
+          oninput="this.value=this.value.toUpperCase()"
+          onkeydown="if(event.key==='Enter')camLoadPlayers()"
+          style="font-family:'Space Mono',monospace;font-size:22px;letter-spacing:6px;text-align:center;text-transform:uppercase;padding:13px;margin-bottom:4px">
+        <div id="cam-code-err" style="display:none;font-size:12px;color:var(--danger);margin-top:6px;padding:7px 10px;background:rgba(231,76,60,.08);border-radius:8px;border:1px solid rgba(231,76,60,.2)"></div>
+      </div>
+
+      <button class="btn btn-primary btn-block" style="font-size:15px;padding:14px;border-radius:13px;margin-bottom:10px" onclick="camLoadPlayers()">🔍 Load Player List</button>
+      <p style="font-size:12px;color:rgba(255,255,255,.2);line-height:1.6">Enter the code shown on the projector screen to see who's playing.</p>
+    </div>
+
+    <!-- ── STEP 2: Pick player + camera settings ── -->
+    <div id="cam-step-setup" style="display:none;text-align:center;max-width:460px;width:100%;position:relative">
+
+      <!-- Back button -->
+      <button onclick="camGoBack()" style="display:inline-flex;align-items:center;gap:6px;background:transparent;border:none;color:rgba(255,255,255,.4);font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer;margin-bottom:20px;padding:0">
+        ← Back
+      </button>
+
+      <div style="font-family:'Bebas Neue',cursive;font-size:32px;letter-spacing:2px;color:var(--gold);margin-bottom:6px">Set Up Camera</div>
+      <div id="cam-setup-gamecode" style="font-family:'Space Mono',monospace;font-size:12px;color:rgba(245,200,66,.5);letter-spacing:3px;margin-bottom:24px"></div>
+
+      <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:26px;text-align:left;margin-bottom:16px">
+
+        <!-- Player selector -->
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:10px;display:block">Who is this camera filming?</label>
+        <div id="cam-player-cards" style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:18px"></div>
+
+        <!-- Manual name fallback -->
+        <div id="cam-manual-wrap" style="margin-bottom:18px">
+          <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:8px;display:block">Or enter a name manually</label>
+          <input id="cam-manual-input" class="ifield" placeholder="Contestant name…" style="font-size:15px;padding:11px 14px">
+        </div>
+
+        <!-- Camera source selector -->
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:10px;display:block">Camera source</label>
+        <div style="display:flex;gap:8px;margin-bottom:6px">
+          <button id="cam-face-user" class="btn btn-sm" onclick="setCamFace('user')" style="flex:1;justify-content:center">🤳 Front</button>
+          <button id="cam-face-env" class="btn btn-sm" onclick="setCamFace('environment')" style="flex:1;justify-content:center">📷 Back</button>
+        </div>
+
+        <!-- Device selector — populated once getUserMedia runs an enumeration -->
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-top:14px;margin-bottom:8px;display:block">Specific camera device</label>
+        <select id="cam-device-sel" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:11px 14px;color:rgba(255,255,255,.75);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer">
+          <option value="">— Auto (use facing mode above) —</option>
+        </select>
+        <button onclick="camEnumerateDevices()" style="margin-top:7px;width:100%;padding:8px;background:transparent;border:1px dashed rgba(255,255,255,.15);border-radius:9px;color:rgba(255,255,255,.4);font-size:12px;font-family:'DM Sans',sans-serif;cursor:pointer">🔄 Detect available cameras</button>
+      </div>
+
+      <div id="cam-idle-err" style="display:none;background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--danger);margin-bottom:14px"></div>
+      <button class="btn btn-gold btn-block" style="font-size:16px;padding:15px;border-radius:14px" onclick="startCamStream()">▶ Start Streaming</button>
+      <p style="font-size:12px;color:rgba(255,255,255,.2);margin-top:12px;line-height:1.6">Keep this screen open and the device plugged in during the game.</p>
+    </div>
+
+    <!-- ── STEP 3: Live streaming ── -->
+    <div id="cam-live" style="display:none;position:fixed;inset:0;background:#000;z-index:50">
+      <video id="cam-live-vid" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+
+      <!-- top bar -->
+      <div style="position:absolute;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:linear-gradient(to bottom,rgba(0,0,0,.85),transparent)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="background:var(--danger);color:#fff;font-size:10px;font-family:'Space Mono',monospace;padding:4px 11px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px">● LIVE</div>
+          <div id="cam-live-label" style="font-family:'Bebas Neue',cursive;font-size:20px;color:var(--gold);letter-spacing:2px"></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="flipCam()" style="padding:8px 14px;border-radius:9px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">🔄 Flip</button>
+          <button onclick="camSwitchPlayer()" style="padding:8px 14px;border-radius:9px;background:rgba(91,76,255,.3);border:1px solid rgba(91,76,255,.5);color:var(--accent);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">👥 Switch</button>
+          <button onclick="stopCamStream()" style="padding:8px 14px;border-radius:9px;background:rgba(231,76,60,.25);border:1px solid rgba(231,76,60,.4);color:var(--danger);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">⏹ Stop</button>
+        </div>
+      </div>
+
+      <!-- filming info bottom -->
+      <div style="position:absolute;bottom:22px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(0,0,0,.7);border:1px solid rgba(245,200,66,.35);border-radius:13px;padding:10px 24px;text-align:center;backdrop-filter:blur(10px);white-space:nowrap">
+        <div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;margin-bottom:3px">Now Filming</div>
+        <div id="cam-live-name" style="font-family:'Bebas Neue',cursive;font-size:28px;color:var(--gold);letter-spacing:2px;line-height:1"></div>
+        <div id="cam-live-gamecode" style="font-family:'Space Mono',monospace;font-size:10px;color:rgba(245,200,66,.45);margin-top:3px;letter-spacing:2px"></div>
+      </div>
+    </div>
+
+  </div>
 </div>
 
 <!-- ADMIN -->
@@ -597,13 +736,14 @@ function go(id){
   document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'));
   const sc=document.getElementById('screen-'+id);
   if(sc) sc.classList.add('active');
-  const map={home:0,join:1,lobby:2,game:3,projector:4};
+  const map={home:0,join:1,lobby:2,game:3,projector:4,camera:5};
   const tabs=document.querySelectorAll('.nav-tab');
   if(map[id]!==undefined) tabs[map[id]].classList.add('active');
-  if(id==='admin'||id==='adminlogin') tabs[5].classList.add('active');
+  if(id==='admin'||id==='adminlogin') tabs[6].classList.add('active');
   if(id==='projector') renderProj();
   if(id==='join') renderJoin();
   if(id==='lobby') renderLobby();
+  if(id==='camera') renderCamScreen();
 }
 
 // ═══ AUTH ═══
@@ -622,11 +762,17 @@ function doLogin(){
   if(!p){showE('ep');addE('fp');return;}
   if(u!==AU||p!==AP){showE('ec');addE('fu');addE('fp');return;}
   S.ain=true;
+  sessionStorage.setItem('qs_admin','1');
   const chip=document.getElementById('achip');chip.style.display='flex';
   go('admin');
   aTab('overview',document.querySelector('.anav'));
 }
-function doLogout(){S.ain=false;document.getElementById('achip').style.display='none';go('home');}
+function doLogout(){
+  S.ain=false;
+  sessionStorage.removeItem('qs_admin');
+  document.getElementById('achip').style.display='none';
+  go('home');
+}
 function showE(id){const e=document.getElementById(id);if(e)e.classList.add('on');}
 function hideE(id){const e=document.getElementById(id);if(e)e.classList.remove('on');}
 function addE(id){const e=document.getElementById(id);if(e)e.classList.add('ef');}
@@ -698,24 +844,525 @@ function releaseGame(){
   const gameData={ gc:S.gc, aqId:q.id, curQ:0, paused:false, revealAns:false, curStep:70, status:'active' };
   if(window._fb&&window._fb.ready()){ window._fb.pushGame(gameData); window._fb.pushPlayers([]); }
   renderOverview(); renderProj();
-  toast('Game live! Code: '+S.gc,'ok');
+  updateFloatBar();toast('Game live! Code: '+S.gc,'ok');
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
   S.curQ=0; S.paused=false; S.revealAns=false;
+  sessionStorage.removeItem('qs_player');
   document.getElementById('tlobby').disabled=true;
   document.getElementById('tgame').disabled=true;
   if(window._fb&&window._fb.ready()){ window._fb.pushGame(null); window._fb.pushPlayers([]); }
   renderOverview(); renderProj(); renderSession();
-  toast('Session ended.','nf');
+  updateFloatBar();toast('Session ended.','nf');
 }
 function adjScore(playerIdx, delta){
   if(!S.players[playerIdx])return;
   S.players[playerIdx].score=(S.players[playerIdx].score||0)+delta;
   if(window._fb&&window._fb.ready()) window._fb.updatePlayer(S.players[playerIdx].name, { score: S.players[playerIdx].score });
-  renderProj();renderScores();
+  renderProj(); renderScores(); updateFloatBar();
   toast(x(S.players[playerIdx].name)+': '+(delta>0?'+':'')+delta+' pts','nf');
+}
+
+// ── Update the floating admin bar — visible on EVERY screen when admin + game is live ──
+function updateFloatBar(){
+  const bar=document.getElementById('admin-float-bar');
+  if(!bar) return;
+  if(!S.ain||!S.gon){ bar.classList.remove('visible'); return; }
+  bar.classList.add('visible');
+  const totalQ=S.aq&&S.aq.questions?S.aq.questions.length:0;
+  const cur=S.curQ||0;
+  const qnum=document.getElementById('afb-qnum');
+  if(qnum) qnum.textContent='Q'+(cur+1)+'/'+totalQ;
+  const nextBtn=document.getElementById('afb-next');
+  if(nextBtn) nextBtn.disabled=(cur>=totalQ-1);
+  const pauseBtn=document.getElementById('afb-pause');
+  if(pauseBtn){
+    pauseBtn.textContent=S.paused?'▶ Resume':'⏸ Pause';
+    pauseBtn.style.color=S.paused?'var(--safe)':'var(--warn)';
+    pauseBtn.style.borderColor=S.paused?'rgba(46,204,113,.5)':'rgba(243,156,18,.5)';
+  }
+  const revBtn=document.getElementById('afb-reveal');
+  if(revBtn){
+    revBtn.textContent=S.revealAns?'🙈 Hide Ans':'👁 Reveal';
+    revBtn.style.background=S.revealAns?'rgba(46,204,113,.25)':'rgba(46,204,113,.12)';
+  }
+  // Score controls in bar — only shown when multiplayer
+  const scorePanel=document.getElementById('afb-scores');
+  if(scorePanel){
+    if(S.players.length>1){
+      scorePanel.style.display='flex';
+      scorePanel.innerHTML=S.players.slice(0,4).map((p,i)=>
+        '<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;padding:4px 8px">'
+        +'<span style="font-size:13px">'+p.emoji+'</span>'
+        +'<span style="font-size:12px;font-weight:600;color:var(--text)">'+x(p.name.split(' ')[0])+'</span>'
+        +'<button onclick="adjScore('+i+',-10)" style="width:20px;height:20px;border-radius:5px;border:none;background:rgba(231,76,60,.3);color:#fff;font-size:13px;font-weight:900;cursor:pointer;padding:0;line-height:1">−</button>'
+        +'<span style="font-family:\'Space Mono\',monospace;font-size:12px;color:var(--gold);min-width:34px;text-align:center">'+(p.score||0)+'</span>'
+        +'<button onclick="adjScore('+i+',10)" style="width:20px;height:20px;border-radius:5px;border:none;background:rgba(46,204,113,.3);color:#fff;font-size:13px;font-weight:900;cursor:pointer;padding:0;line-height:1">+</button>'
+        +'</span>'
+      ).join('');
+    } else {
+      scorePanel.style.display='none';
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// CAMERA DEVICE SYSTEM
+// Any separate device opens the 📷 Camera tab, enters the
+// game code, picks a player, selects a camera, and streams.
+// MediaStream stored in S.streams[playerName]; shared to other
+// same-origin tabs via BroadcastChannel.
+// ════════════════════════════════════════════════════════════
+if(!S.streams) S.streams={};
+let _camFace = 'environment'; // back cam = filming others
+let _camActivePlayer = null;
+let _camCurrentStream = null;
+let _camSelectedPlayer = null; // highlighted card selection
+let _camLoadedCode = null;     // game code entered on this cam device
+
+// BroadcastChannel — notify other tabs on the same origin
+const _bc = (() => {
+  try { return new BroadcastChannel('quizstage_cam'); } catch(e){ return null; }
+})();
+if(_bc){
+  _bc.onmessage = ev => {
+    if(!ev.data) return;
+    if(ev.data.type==='cam-ready'){ renderCameras(); renderProj(); }
+    if(ev.data.type==='cam-stopped'){ delete S.streams[ev.data.player]; renderCameras(); renderProj(); }
+  };
+}
+
+// ── Render the camera setup screen ──
+function renderCamScreen(){
+  // If already streaming, skip re-render (don't disturb live state)
+  if(_camCurrentStream) return;
+  // Show step 1 (code entry) by default
+  camShowStep('code');
+  setCamFace(_camFace, true);
+}
+
+function camShowStep(step){
+  ['cam-step-code','cam-step-setup','cam-live'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.style.display='none';
+  });
+  const target = step==='code' ? 'cam-step-code'
+               : step==='setup'? 'cam-step-setup'
+               : 'cam-live';
+  const el=document.getElementById(target);
+  if(el) el.style.display='block';
+}
+
+// Step 1: user presses "Load Player List"
+function camLoadPlayers(){
+  const inp = document.getElementById('cam-code-input');
+  const errEl = document.getElementById('cam-code-err');
+  if(!inp) return;
+  const code = inp.value.trim().toUpperCase();
+  if(errEl){ errEl.style.display='none'; errEl.textContent=''; }
+
+  if(!code || code.length < 4){
+    if(errEl){ errEl.textContent='⚠️ Enter a valid game code (e.g. QZ-AB12)'; errEl.style.display='block'; }
+    return;
+  }
+
+  // Try to match against the live local game (same-tab admin scenario)
+  // OR accept any code and let admin assign later (multi-device scenario)
+  const codeMatches = S.gon && S.gc && (S.gc === code);
+  if(!codeMatches && S.gon && S.gc){
+    if(errEl){ errEl.textContent='❌ Code "'+code+'" does not match the active game ('+S.gc+'). Check the projector screen.'; errEl.style.display='block'; }
+    return;
+  }
+  if(!S.gon){
+    // No game running in this tab — accept the code anyway (camera device opened standalone)
+    // We'll let them set up with manual name
+  }
+
+  _camLoadedCode = code;
+  camBuildSetupStep(code);
+  camShowStep('setup');
+}
+
+function camBuildSetupStep(code){
+  // Update code label
+  const lbl = document.getElementById('cam-setup-gamecode');
+  if(lbl) lbl.textContent = '🎮 ' + code;
+
+  // Build player selection cards
+  const cardBox = document.getElementById('cam-player-cards');
+  if(!cardBox) return;
+  cardBox.innerHTML = '';
+  _camSelectedPlayer = null;
+
+  const players = S.gon ? S.players : [];
+  if(players.length){
+    players.forEach(p=>{
+      const hasStream = !!(S.streams && S.streams[p.name]);
+      const card = document.createElement('div');
+      card.setAttribute('data-pname', p.name);
+      card.style.cssText = 'background:rgba(255,255,255,.05);border:2px solid rgba(255,255,255,.1);border-radius:13px;padding:14px 10px;text-align:center;cursor:pointer;transition:all .18s;position:relative;';
+      card.innerHTML = '<div style="font-size:28px;margin-bottom:6px">'+p.emoji+'</div>'
+        +'<div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:3px">'+x(p.name)+'</div>'
+        +'<div style="font-size:10px;color:'+(hasStream?'var(--safe)':'rgba(255,255,255,.3)')+';">'+(hasStream?'● Camera active':'No feed')+'</div>';
+      card.onclick = () => camSelectPlayer(p.name, card);
+      cardBox.appendChild(card);
+    });
+    // Hide manual input when players exist
+    const mw = document.getElementById('cam-manual-wrap');
+    if(mw) mw.style.display = 'none';
+  } else {
+    // No players in local state — show manual input
+    cardBox.innerHTML = '<div style="grid-column:1/-1;padding:18px;text-align:center;color:rgba(255,255,255,.35);font-size:13px;border:1px dashed rgba(255,255,255,.12);border-radius:11px">No players found locally.<br>Enter the contestant\'s name below.</div>';
+    const mw = document.getElementById('cam-manual-wrap');
+    if(mw) mw.style.display = 'block';
+  }
+}
+
+function camSelectPlayer(name, cardEl){
+  _camSelectedPlayer = name;
+  document.querySelectorAll('#cam-player-cards > div').forEach(c=>{
+    c.style.borderColor = 'rgba(255,255,255,.1)';
+    c.style.background = 'rgba(255,255,255,.05)';
+  });
+  if(cardEl){
+    cardEl.style.borderColor = 'rgba(91,76,255,.8)';
+    cardEl.style.background = 'rgba(91,76,255,.15)';
+  }
+  // Clear manual input
+  const mi = document.getElementById('cam-manual-input');
+  if(mi) mi.value = '';
+}
+
+function camGoBack(){
+  _camSelectedPlayer = null;
+  camShowStep('code');
+}
+
+// Enumerate physical camera devices for the device selector dropdown
+async function camEnumerateDevices(){
+  try{
+    // Must call getUserMedia once first to get labels
+    const tmp = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+    tmp.getTracks().forEach(t=>t.stop());
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevs = devices.filter(d=>d.kind==='videoinput');
+    const sel = document.getElementById('cam-device-sel');
+    if(!sel) return;
+    sel.innerHTML = '<option value="">— Auto (use facing mode) —</option>';
+    videoDevs.forEach((d,i)=>{
+      const opt=document.createElement('option');
+      opt.value=d.deviceId;
+      opt.textContent=d.label || ('Camera '+(i+1));
+      sel.appendChild(opt);
+    });
+    toast('Found '+videoDevs.length+' camera'+(videoDevs.length!==1?'s':''),'ok');
+  }catch(e){
+    toast('Could not list cameras: '+e.message,'er');
+  }
+}
+
+function setCamFace(mode, silent){
+  _camFace=mode;
+  const fu=document.getElementById('cam-face-user');
+  const fe=document.getElementById('cam-face-env');
+  if(!fu||!fe) return;
+  const on='background:rgba(91,76,255,.85);color:#fff;border:1px solid transparent;';
+  const off='background:rgba(255,255,255,.07);color:rgba(255,255,255,.5);border:1px solid rgba(255,255,255,.12);';
+  fu.style.cssText=(mode==='user'?on:off);
+  fe.style.cssText=(mode==='environment'?on:off);
+}
+
+async function startCamStream(){
+  const errEl=document.getElementById('cam-idle-err');
+  if(errEl){ errEl.style.display='none'; errEl.textContent=''; }
+
+  // Resolve player name: card selection > manual input
+  let pname = _camSelectedPlayer || '';
+  if(!pname){
+    const mi = document.getElementById('cam-manual-input');
+    pname = mi ? mi.value.trim() : '';
+  }
+  if(!pname){
+    if(errEl){ errEl.textContent='⚠️ Select a player card or enter a name first.'; errEl.style.display='block'; }
+    return;
+  }
+
+  // Stop any running stream
+  if(_camCurrentStream){
+    _camCurrentStream.getTracks().forEach(t=>t.stop());
+    _camCurrentStream=null;
+  }
+
+  // Build constraints — prefer specific deviceId if chosen
+  const devSel = document.getElementById('cam-device-sel');
+  const deviceId = devSel ? devSel.value : '';
+  const constraints = {
+    audio: false,
+    video: deviceId
+      ? { deviceId: { exact: deviceId }, width:{ideal:1920}, height:{ideal:1080} }
+      : { facingMode:{ ideal:_camFace }, width:{ideal:1920}, height:{ideal:1080} }
+  };
+
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    _camCurrentStream = stream;
+    _camActivePlayer  = pname;
+    S.streams[pname]  = stream;
+
+    // Wire to full-screen preview
+    const vid=document.getElementById('cam-live-vid');
+    if(vid){ vid.srcObject=stream; vid.play().catch(()=>{}); }
+
+    // Labels
+    const lbl=document.getElementById('cam-live-label');
+    const nm =document.getElementById('cam-live-name');
+    const gc =document.getElementById('cam-live-gamecode');
+    if(lbl) lbl.textContent='● STREAMING';
+    if(nm)  nm.textContent=pname;
+    if(gc)  gc.textContent=_camLoadedCode||S.gc||'';
+
+    // Notify sibling tabs
+    if(_bc) _bc.postMessage({type:'cam-ready', player:pname});
+
+    // Switch to live view
+    camShowStep('live');
+
+    // Attach to any already-rendered video elements for this player
+    document.querySelectorAll('video[data-player="'+pname+'"]').forEach(v=>{
+      v.srcObject=stream; v.play().catch(()=>{});
+    });
+
+    toast('📹 Streaming: '+pname,'ok');
+    renderCameras(); renderProj();
+
+  }catch(err){
+    const msg = err.name==='NotAllowedError'
+      ? '❌ Camera permission denied. Allow camera in browser settings then try again.'
+      : err.name==='NotFoundError'
+      ? '❌ No camera detected on this device.'
+      : err.name==='OverconstrainedError'
+      ? '❌ Selected camera unavailable. Try "Auto" in camera source.'
+      : '❌ Camera error: '+err.message;
+    if(errEl){ errEl.textContent=msg; errEl.style.display='block'; }
+  }
+}
+
+async function flipCam(){
+  _camFace = _camFace==='environment' ? 'user' : 'environment';
+  // Clear deviceId selection so facing mode takes over
+  const ds=document.getElementById('cam-device-sel');
+  if(ds) ds.value='';
+  if(_camCurrentStream && _camActivePlayer) await startCamStream();
+}
+
+function camSwitchPlayer(){
+  // Stop stream, go back to setup step
+  if(_camCurrentStream){
+    _camCurrentStream.getTracks().forEach(t=>t.stop());
+    _camCurrentStream=null;
+  }
+  if(_camActivePlayer){
+    delete S.streams[_camActivePlayer];
+    if(_bc) _bc.postMessage({type:'cam-stopped', player:_camActivePlayer});
+  }
+  _camActivePlayer=null;
+  _camSelectedPlayer=null;
+  if(_camLoadedCode) camBuildSetupStep(_camLoadedCode);
+  camShowStep('setup');
+  renderCameras(); renderProj();
+}
+
+function stopCamStream(){
+  if(_camCurrentStream){
+    _camCurrentStream.getTracks().forEach(t=>t.stop());
+    _camCurrentStream=null;
+  }
+  if(_camActivePlayer){
+    delete S.streams[_camActivePlayer];
+    if(_bc) _bc.postMessage({type:'cam-stopped', player:_camActivePlayer});
+    _camActivePlayer=null;
+  }
+  _camSelectedPlayer=null;
+  const vid=document.getElementById('cam-live-vid');
+  if(vid) vid.srcObject=null;
+  camShowStep('code');
+  renderCameras(); renderProj();
+  toast('Camera stopped.','nf');
+}
+
+// ── attach an existing stream to a <video> element ──
+function attachStream(videoEl, playerName){
+  if(S.streams&&S.streams[playerName]){
+    videoEl.srcObject=S.streams[playerName];
+    videoEl.play().catch(()=>{});
+  }
+}
+
+// ── no-op legacy shim ──
+async function requestCameraForPlayer(){ return null; }
+
+// ═══ PROJECTOR ═══
+function renderProj(){
+  const el=document.getElementById('proj');
+  updateFloatBar();
+
+  // ── No game ──
+  if(!S.gon){
+    el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:60px';
+    el.innerHTML='<div style="font-size:70px;opacity:.2;margin-bottom:18px">📺</div><div style="font-family:\'Bebas Neue\',cursive;font-size:40px;letter-spacing:4px;color:rgba(255,255,255,.17);margin-bottom:10px">WAITING FOR HOST</div><div style="color:rgba(255,255,255,.14);font-size:16px">Admin hasn\'t released a game yet.</div>';
+    return;
+  }
+
+  const mp=S.players.length;
+  const qd=S.aq&&S.aq.questions&&S.aq.questions[S.curQ||0];
+  el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;';
+
+  // ══════════════════════════════════════════════════════
+  // SINGLE PLAYER — full-screen video background
+  // Questions + ladder float as foreground overlays
+  // ══════════════════════════════════════════════════════
+  if(mp<=1){
+    const tp=S.players[0]||{emoji:'🎭',name:'Waiting…',score:0};
+    let h='';
+
+    // Layer 1: full-screen video (camera from player device)
+    h+='<video id="proj-vid-main" data-player="'+x(tp.name)+'" autoplay playsinline muted '
+      +'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000"></video>';
+
+    // Layer 2: emoji placeholder (hidden once video plays)
+    h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(100px,16vw,200px);opacity:.5">'+tp.emoji+'</div>';
+
+    // Layer 3: dark gradient at bottom to improve text readability
+    h+='<div style="position:absolute;bottom:0;left:0;right:0;height:55%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.85) 0%,rgba(0,0,0,0) 100%);pointer-events:none"></div>';
+
+    // Layer 4: top-left LIVE badge
+    h+='<div style="position:absolute;top:18px;left:18px;z-index:20;background:var(--danger);color:#fff;font-size:11px;font-family:\'Space Mono\',monospace;padding:5px 13px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
+
+    // Layer 5: top-right player chip (name + score)
+    h+='<div style="position:absolute;top:18px;right:18px;z-index:20;background:rgba(0,0,0,.65);border:1px solid rgba(245,200,66,.4);border-radius:14px;padding:10px 18px;backdrop-filter:blur(10px);text-align:right">';
+    h+='<div style="font-size:10px;color:rgba(255,255,255,.45);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">Contestant</div>';
+    h+='<div style="font-family:\'Bebas Neue\',cursive;font-size:28px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
+    h+='<div style="font-family:\'Space Mono\',monospace;font-size:15px;color:var(--safe);margin-top:4px;font-weight:700">'+(tp.score||0)+' pts</div>';
+    h+='</div>';
+
+    // Layer 6: right-side LADDER panel (foreground, scrollable)
+    const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
+    const sf=[100,50], curStep=S.curStep||150;
+    h+='<div style="position:absolute;top:90px;right:18px;bottom:240px;width:158px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:12px;overflow-y:auto;backdrop-filter:blur(10px)">';
+    h+='<div style="font-family:\'Bebas Neue\',cursive;font-size:13px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:8px">LADDER</div>';
+    steps.forEach((v,i)=>{
+      const cur=v===curStep, safe=sf.includes(v);
+      h+='<div style="display:flex;justify-content:space-between;padding:4px 7px;border-radius:5px;margin-bottom:2px;font-family:\'Space Mono\',monospace;font-size:10px;background:'+(cur?'rgba(245,200,66,.2)':'transparent')+';border:'+(cur?'1px solid rgba(245,200,66,.55)':'1px solid transparent')+';color:'+(cur?'var(--gold)':safe?'var(--safe)':'rgba(255,255,255,.38)')+'"><span>'+(safe?'🛡 ':'')+'Q'+(15-i)+'</span><span>'+v+'</span></div>';
+    });
+    h+='</div>';
+
+    // Layer 7: bottom QUESTION + ANSWERS panel (foreground, left of ladder)
+    h+='<div style="position:absolute;bottom:18px;left:18px;right:194px;z-index:20">';
+    h+='<div style="background:rgba(0,0,0,.85);border:2px solid rgba(91,76,255,.5);border-radius:20px;padding:22px 26px;backdrop-filter:blur(14px)">';
+    h+='<div style="font-family:\'Space Mono\',monospace;color:var(--gold);font-size:11px;margin-bottom:11px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+    h+='<div style="font-size:clamp(14px,1.6vw,21px);font-weight:600;line-height:1.45;color:#fff;margin-bottom:16px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+    (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
+      const isC=S.revealAns&&qd&&i===qd.correct;
+      h+='<div style="background:'+(isC?'rgba(46,204,113,.18)':'rgba(255,255,255,.07)')+';border:2px solid '+(isC?'rgba(46,204,113,.75)':'rgba(255,255,255,.15)')+';border-radius:12px;padding:12px 15px;display:flex;align-items:center;gap:10px;transition:all .4s">';
+      h+='<div style="width:30px;height:30px;border-radius:8px;background:'+(isC?'rgba(46,204,113,.3)':'rgba(255,255,255,.1)')+';display:flex;align-items:center;justify-content:center;font-family:\'Bebas Neue\',cursive;font-size:18px;color:'+(isC?'var(--safe)':'var(--gold)')+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:14px;color:'+(isC?'var(--safe)':'#fff')+';font-weight:500">'+x(a)+'</div></div>';
+    });
+    h+='</div></div></div>';
+
+    el.innerHTML=h;
+
+    // Attach live camera stream if already captured from this player's device
+    const vid=el.querySelector('#proj-vid-main');
+    if(vid){
+      attachStream(vid, tp.name);
+      vid.onplaying=()=>{ const ph=el.querySelector('#proj-vid-ph'); if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }};
+    }
+
+  // ══════════════════════════════════════════════════════
+  // MULTI PLAYER — 4 quadrant video backgrounds
+  // No ladder. Large scores + admin +/− in each corner.
+  // Question bar overlays at the bottom.
+  // ══════════════════════════════════════════════════════
+  } else {
+    const shown=S.players.slice(0,4);
+    let h='';
+
+    // 4-quadrant video grid (full-screen, z-index 1)
+    h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;z-index:1">';
+    shown.forEach((p,i)=>{
+      const score=p.score||0;
+      const bdr=i===0?'2px solid rgba(245,200,66,.35)':'1px solid rgba(255,255,255,.07)';
+      h+='<div style="position:relative;overflow:hidden;border:'+bdr+'">';
+
+      // Video element — fills quadrant as background
+      h+='<video id="proj-vid-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted '
+        +'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000"></video>';
+
+      // Emoji placeholder (fades out when video connects)
+      h+='<div id="proj-ph-'+i+'" style="position:absolute;inset:0;background:linear-gradient(160deg,'+(i%2===0?'#12122a,#0a0a1a':'#1a1228,#0d0d20')+');display:flex;align-items:center;justify-content:center;font-size:clamp(48px,5.5vw,88px);z-index:2;transition:opacity .6s">'+p.emoji+'</div>';
+
+      // Dark vignette overlay to make text pop
+      h+='<div style="position:absolute;inset:0;z-index:3;background:linear-gradient(135deg,rgba(0,0,0,.35) 0%,rgba(0,0,0,0) 50%,rgba(0,0,0,.55) 100%);pointer-events:none"></div>';
+
+      // LIVE badge — top left
+      h+='<div style="position:absolute;top:10px;left:10px;z-index:30;background:var(--danger);color:#fff;font-size:9px;font-family:\'Space Mono\',monospace;padding:3px 9px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;letter-spacing:.5px">● LIVE</div>';
+
+      // Player name chip — top right
+      h+='<div style="position:absolute;top:10px;right:10px;z-index:30;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.15);border-radius:9px;padding:5px 12px;backdrop-filter:blur(8px)">';
+      h+='<div style="font-family:\'Bebas Neue\',cursive;font-size:clamp(15px,1.6vw,22px);color:#fff;letter-spacing:1px;line-height:1">'+x(p.name)+'</div></div>';
+
+      // Score + admin controls — bottom right, BIG and readable
+      h+='<div style="position:absolute;bottom:12px;right:12px;z-index:30;display:flex;align-items:center;gap:8px">';
+      // Always show admin controls — admin is the one awarding points
+      h+='<button onclick="adjScore('+i+',-10)" style="width:38px;height:38px;border-radius:10px;border:2px solid rgba(231,76,60,.6);background:rgba(231,76,60,.3);color:#fff;font-size:22px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);line-height:1">−</button>';
+      // Score box — large gold font, clearly readable on screen
+      h+='<div style="background:rgba(0,0,0,.88);border:2px solid rgba(245,200,66,.65);border-radius:13px;padding:8px 20px;backdrop-filter:blur(8px);text-align:center;min-width:90px">';
+      h+='<div style="font-family:\'Bebas Neue\',cursive;font-size:clamp(28px,3.2vw,44px);color:var(--gold);line-height:1;letter-spacing:1px">'+score+'</div>';
+      h+='<div style="font-size:11px;color:rgba(245,200,66,.75);letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-top:2px">PTS</div>';
+      h+='</div>';
+      h+='<button onclick="adjScore('+i+',10)" style="width:38px;height:38px;border-radius:10px;border:2px solid rgba(46,204,113,.6);background:rgba(46,204,113,.3);color:#fff;font-size:22px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px);line-height:1">+</button>';
+      h+='</div>';
+
+      h+='</div>'; // end quadrant
+    });
+
+    // Fill empty slots
+    for(let i=shown.length;i<4;i++){
+      h+='<div style="background:#07070f;border:1px solid rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.12);font-size:15px;font-style:italic">Waiting for player…</div>';
+    }
+    h+='</div>'; // end grid
+
+    // Question bar — full-width overlay at bottom (z-index 20, above everything)
+    h+='<div style="position:absolute;bottom:0;left:0;right:0;z-index:20;background:rgba(0,0,0,.9);border-top:2px solid rgba(91,76,255,.5);padding:16px 24px;backdrop-filter:blur(16px)">';
+    h+='<div style="font-family:\'Space Mono\',monospace;color:var(--gold);font-size:11px;margin-bottom:8px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+    h+='<div style="font-size:clamp(13px,1.5vw,19px);font-weight:600;color:#fff;margin-bottom:13px;line-height:1.4">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+    h+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">';
+    (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
+      const isC=S.revealAns&&qd&&i===qd.correct;
+      h+='<div style="background:'+(isC?'rgba(46,204,113,.18)':'rgba(255,255,255,.07)')+';border:2px solid '+(isC?'rgba(46,204,113,.75)':'rgba(255,255,255,.13)')+';border-radius:10px;padding:10px 13px;display:flex;align-items:center;gap:8px">';
+      h+='<div style="width:27px;height:27px;border-radius:7px;background:'+(isC?'rgba(46,204,113,.3)':'rgba(255,255,255,.1)')+';display:flex;align-items:center;justify-content:center;font-family:\'Bebas Neue\',cursive;font-size:16px;color:'+(isC?'var(--safe)':'var(--gold)')+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:13px;color:'+(isC?'var(--safe)':'#fff')+';font-weight:500;line-height:1.3">'+x(a)+'</div></div>';
+    });
+    h+='</div></div>';
+
+    el.innerHTML=h;
+
+    // Attach live streams to each quadrant video
+    shown.forEach((p,i)=>{
+      const vid=el.querySelector('#proj-vid-'+i);
+      if(vid){
+        attachStream(vid, p.name);
+        const idx=i;
+        vid.onplaying=()=>{
+          const ph=el.querySelector('#proj-ph-'+idx);
+          if(ph){ ph.style.opacity='0'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
+        };
+      }
+    });
+  }
 }
 
 // ═══ QUIZ LIBRARY ═══
@@ -949,6 +1596,7 @@ function renderSession(){
     }
   }
   document.getElementById('ap-session').innerHTML=h;
+  updateFloatBar();
 }
 function sessionNext(){
   if(!S.gon)return;
@@ -958,42 +1606,57 @@ function sessionNext(){
   const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active' });
-  renderSession();renderProj();
+  renderSession();renderProj();updateFloatBar();
   toast('Moved to Q'+(S.curQ+1),'ok');
 }
 function sessionPause(){
   S.paused=!S.paused;
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active' });
-  renderSession();
+  renderSession();updateFloatBar();
   toast(S.paused?'Game paused.':'Game resumed.','nf');
 }
 function toggleReveal(){
   S.revealAns=!S.revealAns;
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active' });
-  renderSession();renderProj();
+  renderSession();renderProj();updateFloatBar();
   toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
 
 // ═══ CAMERAS ═══
 function renderCameras(){
   const n=S.players.length;
-  let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px"><div class="ptitle" style="margin-bottom:0">Camera Feeds</div><span class="tag tg">'+n+' Stream'+(n!==1?'s':'')+'</span></div>';
+  let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><div class="ptitle" style="margin-bottom:0">Camera Feeds</div><span class="tag tg">'+n+' Stream'+(n!==1?'s':'')+'</span></div>';
+  h+='<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.6"><strong style="color:var(--text)">📡 How cameras work:</strong> Each player&apos;s camera streams from their own device. Their video feeds appear here and as the background on the Projector screen.</div>';
   if(!n){
-    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">📹</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Camera Feeds</div><div style="font-size:14px">Feeds appear once players join.</div></div>';
+    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">📹</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Camera Feeds</div><div style="font-size:14px">Feeds appear once players join an active game.</div></div>';
   } else {
-    h+='<p style="color:var(--muted);font-size:14px;margin-bottom:14px">Click a feed to set it as main projector view.</p>';
+    h+='<p style="color:var(--muted);font-size:13px;margin-bottom:14px">Live previews from each player device. Click a card to pin it as the main projector view.</p>';
     h+='<div class="feed-grid">';
     S.players.forEach((p,i)=>{
+      const hasStream=S.streams&&S.streams[p.name];
       h+='<div class="fcard'+(i===0?' fm':'')+'" onclick="setMain(this,\''+x(p.name)+'\')">';
-      h+='<div class="fvid">'+p.emoji;
-      if(i===0) h+='<span style="position:absolute;top:7px;left:7px;background:var(--gold);color:var(--deep);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px">MAIN</span>';
-      h+='<span style="position:absolute;top:7px;right:7px;background:var(--danger);color:#fff;font-size:9px;padding:2px 7px;border-radius:20px;animation:pulse 2s infinite">● LIVE</span></div>';
-      h+='<div style="padding:8px 11px;font-size:13px;font-weight:600;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'+x(p.name)+'<div style="display:flex;gap:2px;align-items:flex-end"><div style="width:3px;height:6px;background:var(--safe);border-radius:2px"></div><div style="width:3px;height:10px;background:var(--safe);border-radius:2px"></div><div style="width:3px;height:14px;background:var(--safe);border-radius:2px"></div></div></div>';
+      h+='<div class="fvid" style="position:relative">';
+      if(hasStream) h+='<video id="cam-prev-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;"></video>';
+      h+='<span style="z-index:2;position:relative">';
+      h+=(hasStream?'':(p.emoji));
+      h+='</span>';
+      if(i===0) h+='<span style="position:absolute;top:7px;left:7px;z-index:3;background:var(--gold);color:var(--deep);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px">MAIN</span>';
+      h+='<span style="position:absolute;top:7px;right:7px;z-index:3;background:'+(hasStream?'var(--danger)':'var(--muted)')+';color:#fff;font-size:9px;padding:2px 7px;border-radius:20px;'+(hasStream?'animation:pulse 2s infinite':'')+'">';
+      h+=(hasStream?'● LIVE':'No feed')+'</span>';
+      h+='</div>';
+      h+='<div style="padding:8px 11px;font-size:13px;font-weight:600;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'+x(p.name);
+      h+='<span style="font-family:\'Space Mono\',monospace;font-size:11px;color:var(--gold)">'+(p.score||0)+' pts</span></div>';
       h+='</div>';
     });
     h+='</div>';
   }
   document.getElementById('ap-cameras').innerHTML=h;
+  if(S.streams){
+    S.players.forEach((p,i)=>{
+      const vid=document.getElementById('cam-prev-'+i);
+      if(vid&&S.streams[p.name]){ vid.srcObject=S.streams[p.name]; vid.play().catch(()=>{}); }
+    });
+  }
 }
 function setMain(card,name){document.querySelectorAll('.fcard').forEach(c=>c.classList.remove('fm'));card.classList.add('fm');toast(name+' set as main feed.','nf');renderCameras();}
 
@@ -1105,6 +1768,8 @@ function _completeJoin(code, pname, gameData){
   const playerObj={name:pname, emoji, score:0};
   if(!S.players.find(p=>p.name===pname)) S.players.push(playerObj);
   S.me=pname; S.playerCode=code;
+  // Persist player session so a reload doesn't log them out
+  sessionStorage.setItem('qs_player', JSON.stringify({name:pname, emoji, code}));
   // Write to Firebase so admin and projector see this player
   if(window._fb&&window._fb.ready()) window._fb.updatePlayer(pname, playerObj);
   document.getElementById('tlobby').disabled=false;
@@ -1214,6 +1879,69 @@ function renderProj(){
 })();
 function pickAns(btn,r){document.querySelectorAll('.abtn').forEach(b=>{b.classList.remove('correct','wrong');b.disabled=true;});btn.classList.add(r==='correct'?'correct':'wrong');if(r==='wrong')document.querySelectorAll('.abtn')[1].classList.add('correct');}
 function clearAns(){document.querySelectorAll('.abtn').forEach(b=>{b.classList.remove('correct','wrong');b.disabled=false;});}
+
+// ═══ SESSION RESTORE ON RELOAD ═══
+(function restoreSession(){
+  // ── Admin ──
+  if(sessionStorage.getItem('qs_admin')==='1'){
+    S.ain=true;
+    document.getElementById('achip').style.display='flex';
+    // Don't navigate yet — Firebase sync will populate state.
+    // Once FB fires or on timeout, go to admin.
+    const goAdmin=()=>{ go('admin'); aTab('overview',document.querySelector('.anav')); };
+    if(window._fb&&window._fb.ready()){ goAdmin(); }
+    else { window.addEventListener('fb-ready',goAdmin,{once:true}); setTimeout(goAdmin,2000); }
+    return; // admin takes priority — skip player restore
+  }
+
+  // ── Player ──
+  const raw=sessionStorage.getItem('qs_player');
+  if(!raw) return;
+  let saved;
+  try{ saved=JSON.parse(raw); }catch(e){ sessionStorage.removeItem('qs_player'); return; }
+  if(!saved||!saved.name||!saved.code){ sessionStorage.removeItem('qs_player'); return; }
+
+  const rejoin=(gameData)=>{
+    // Validate the saved code still matches the live game
+    if(!gameData||gameData.gc!==saved.code){
+      // Game is gone or code mismatch — clear saved session, show join screen
+      sessionStorage.removeItem('qs_player');
+      toast('Your previous game has ended.','nf');
+      return;
+    }
+    // Hydrate state
+    S.gon=true; S.gc=gameData.gc; S.curQ=gameData.curQ||0;
+    S.paused=gameData.paused||false; S.revealAns=gameData.revealAns||false;
+    S.me=saved.name; S.playerCode=saved.code;
+    if(gameData.aqId){ const found=S.quizzes.find(q=>q.id===gameData.aqId); if(found) S.aq=found; }
+    // Re-register player emoji from saved data
+    const playerObj={name:saved.name, emoji:saved.emoji, score:0};
+    if(!S.players.find(p=>p.name===saved.name)) S.players.push(playerObj);
+    document.getElementById('tlobby').disabled=false;
+    document.getElementById('tgame').disabled=false;
+    document.getElementById('gcname').textContent=saved.name;
+    go('lobby');
+    toast('Welcome back, '+saved.name+'! 👋','ok');
+  };
+
+  if(window._fb&&window._fb.ready()){
+    const {getDatabase,ref,get}=window._fbModules||{};
+    if(get&&ref){ get(ref(getDatabase(),'quizstage/game')).then(snap=>rejoin(snap.val())).catch(()=>sessionStorage.removeItem('qs_player')); }
+    else rejoin(null);
+  } else {
+    // No Firebase — check against local S after a brief delay
+    window.addEventListener('fb-ready',()=>{
+      const {getDatabase,ref,get}=window._fbModules||{};
+      if(get&&ref){ get(ref(getDatabase(),'quizstage/game')).then(snap=>rejoin(snap.val())).catch(()=>{}); }
+    },{once:true});
+    // Also try local-only mode after 2s timeout if FB never fires
+    setTimeout(()=>{
+      if(S.me) return; // already rejoined via FB
+      if(S.gon&&S.gc===saved.code) rejoin({gc:S.gc,curQ:S.curQ,paused:S.paused,revealAns:S.revealAns,aqId:S.aq&&S.aq.id});
+      else { sessionStorage.removeItem('qs_player'); }
+    },2500);
+  }
+})();
 
 // ═══ INIT ═══
 renderProj();
