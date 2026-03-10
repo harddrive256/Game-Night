@@ -43,30 +43,39 @@ try {
 }
 
 // ─── EXPOSE FB HELPERS TO GLOBAL SCOPE ───────────────────────────────────────
+// Key sanitiser — Firebase keys can't contain . # $ / [ ]
+function sanitiseKey(name){ return name.replace(/[.#$\/\[\]]/g,'_'); }
+
 window._fb = {
   ready: () => _fbReady,
 
+  // Read the current game once (returns a Promise<gameObj|null>)
+  getGame: () => {
+    if (!_fbReady) return Promise.resolve(null);
+    return get(gameRef).then(snap => snap.val());
+  },
+
   // Admin writes the full game state
   pushGame: (gameObj) => {
-    if (!_fbReady) return;
+    if (!_fbReady) return Promise.resolve();
     if (gameObj === null) return remove(gameRef);
     return set(gameRef, gameObj);
   },
 
-  // Admin writes a player list
+  // Admin writes a full player list
   pushPlayers: (arr) => {
-    if (!_fbReady) return;
-    // store as object keyed by name
+    if (!_fbReady) return Promise.resolve();
     const obj = {};
-    arr.forEach(p => { obj[p.name.replace(/[.#$/\[\]]/g,'')] = p; });
+    arr.forEach(p => { obj[sanitiseKey(p.name)] = p; });
     return set(playersRef, obj);
   },
 
-  // Admin adds/updates single player
+  // Player joins: writes their full record (creates if missing, overwrites if exists)
   updatePlayer: (name, data) => {
-    if (!_fbReady) return;
-    const key = name.replace(/[.#$/\[\]]/g,'');
-    return update(ref(db, 'quizstage/players/' + key), data);
+    if (!_fbReady) return Promise.resolve();
+    const key = sanitiseKey(name);
+    // Use set() not update() so a brand-new player node is always created cleanly
+    return set(ref(db, 'quizstage/players/' + key), { ...data, name });
   },
 
   // Listen: called on every game state change (all clients)
@@ -86,7 +95,6 @@ window._fb = {
 };
 
 // Signal that Firebase is ready so the main script can subscribe
-window._fbModules = { getDatabase, ref, get };
 window.dispatchEvent(new Event('fb-ready'));
 </script>
 <style>
@@ -680,18 +688,38 @@ function initFirebaseSync() {
         // already in lobby — just re-render to show latest state
       }
     }
-    renderOverview(); renderProj(); renderSession(); renderLobby();
+    renderOverview(); renderProj(); renderSession(); renderLobby(); renderScores(); updateFloatBar();
   });
 
-  // ── Listen: players list → sync into S.players and re-render ──
+  // ── Listen: players list → sync into S.players and re-render everywhere ──
   fb.onPlayers(playerArr => {
-    S.players = playerArr;
-    renderOverview(); renderLobby(); renderProj(); renderScores(); renderCameras();
-    // keep my own score in sync
+    // Merge: preserve local emoji/score if Firebase doesn't have it yet
+    S.players = playerArr.map(fp => {
+      const local = S.players.find(lp => lp.name === fp.name);
+      return { ...(local||{}), ...fp };
+    });
+    // Re-render ALL panels that show players — whether visible or not
+    renderOverview();
+    renderLobby();
+    renderProj();
+    renderScores();
+    renderCameras();
+    updateFloatBar();
+    // keep my own name chip in sync
     if (S.me) {
       const me = S.players.find(p => p.name === S.me);
-      if (me) document.getElementById('gcname') && (document.getElementById('gcname').textContent = me.name);
+      const chip = document.getElementById('gcname');
+      if (me && chip) chip.textContent = me.name;
     }
+    // Show a toast to admin when a new player joins
+    if (S.ain && S.gon) {
+      const prevCount = (window._prevPlayerCount||0);
+      if(playerArr.length > prevCount){
+        const newest = playerArr[playerArr.length-1];
+        if(newest) toast(newest.emoji+' '+newest.name+' joined!','ok');
+      }
+    }
+    window._prevPlayerCount = playerArr.length;
   });
 }
 
@@ -957,8 +985,9 @@ function camShowStep(step){
 
 // Step 1: user presses "Load Player List"
 function camLoadPlayers(){
-  const inp = document.getElementById('cam-code-input');
+  const inp   = document.getElementById('cam-code-input');
   const errEl = document.getElementById('cam-code-err');
+  const loadBtn = document.querySelector('#cam-step-code .btn-primary');
   if(!inp) return;
   const code = inp.value.trim().toUpperCase();
   if(errEl){ errEl.style.display='none'; errEl.textContent=''; }
@@ -968,21 +997,37 @@ function camLoadPlayers(){
     return;
   }
 
-  // Try to match against the live local game (same-tab admin scenario)
-  // OR accept any code and let admin assign later (multi-device scenario)
-  const codeMatches = S.gon && S.gc && (S.gc === code);
-  if(!codeMatches && S.gon && S.gc){
-    if(errEl){ errEl.textContent='❌ Code "'+code+'" does not match the active game ('+S.gc+'). Check the projector screen.'; errEl.style.display='block'; }
-    return;
-  }
-  if(!S.gon){
-    // No game running in this tab — accept the code anyway (camera device opened standalone)
-    // We'll let them set up with manual name
-  }
+  const proceed = (gameData) => {
+    // If we got a live game from Firebase, check code
+    if(gameData && gameData.gc && gameData.gc !== code){
+      if(errEl){ errEl.textContent='❌ Code "'+code+'" doesn't match the live game. Check the projector screen.'; errEl.style.display='block'; }
+      if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+      return;
+    }
+    // If Firebase has no game but local S does, check against that
+    if(!gameData && S.gon && S.gc && S.gc !== code){
+      if(errEl){ errEl.textContent='❌ Code "'+code+'" doesn't match the active game.'; errEl.style.display='block'; }
+      if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+      return;
+    }
+    // Merge Firebase players into S if not already present
+    if(gameData){ S.gon=true; S.gc=gameData.gc||code; }
+    _camLoadedCode = code;
+    if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+    camBuildSetupStep(code);
+    camShowStep('setup');
+  };
 
-  _camLoadedCode = code;
-  camBuildSetupStep(code);
-  camShowStep('setup');
+  if(window._fb && window._fb.ready()){
+    if(loadBtn){ loadBtn.disabled=true; loadBtn.textContent='⏳ Checking…'; }
+    window._fb.getGame().then(proceed).catch(()=>{
+      if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+      // Can't reach Firebase — accept anyway and allow manual name
+      proceed(null);
+    });
+  } else {
+    proceed(null);
+  }
 }
 
 function camBuildSetupStep(code){
@@ -1726,56 +1771,85 @@ function doJoin(){
   if(!pname){showE('ejname');ok=false;}
   if(!ok) return;
 
+  const btn=document.getElementById('join-submit-btn');
   const fb=window._fb;
 
-  // If Firebase is ready, validate code against live game in DB
+  // ── Firebase path ──
   if(fb && fb.ready()){
-    // Disable button to prevent double-join
-    const btn=document.getElementById('join-submit-btn');
-    if(btn){ btn.disabled=true; btn.textContent='Joining…'; }
+    if(btn){ btn.disabled=true; btn.textContent='⏳ Joining…'; }
 
-    // Read the current game from Firebase once to validate
-    const { getDatabase, ref, get } = window._fbModules || {};
-    if(get && ref){
-      const db=getDatabase();
-      get(ref(db,'quizstage/game')).then(snap=>{
-        const gameData=snap.val();
+    fb.getGame()
+      .then(gameData=>{
         if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
-        if(!gameData){ showE('ejwrong'); document.getElementById('ejwrong').textContent='❌ No active game right now. Ask your host!'; return; }
-        if(code !== gameData.gc){ showE('ejwrong'); document.getElementById('ejwrong').textContent='❌ Wrong code. Check the big screen!'; return; }
+        if(!gameData || gameData.status!=='active'){
+          const el=document.getElementById('ejwrong');
+          if(el) el.textContent='❌ No active game right now. Ask your host to release one!';
+          showE('ejwrong'); return;
+        }
+        if(code !== gameData.gc){
+          const el=document.getElementById('ejwrong');
+          if(el) el.textContent='❌ Wrong code — double-check the big screen.';
+          showE('ejwrong'); return;
+        }
         _completeJoin(code, pname, gameData);
-      }).catch(()=>{ if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; } showE('ejwrong'); });
-    } else {
-      // Firebase ready but get not exposed — fall back
-      if(S.gon && code!==S.gc){ showE('ejwrong'); return; }
-      _completeJoin(code, pname, null);
-    }
+      })
+      .catch(err=>{
+        console.error('Join error:', err);
+        if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
+        const el=document.getElementById('ejwrong');
+        if(el) el.textContent='❌ Could not reach the server. Check your connection.';
+        showE('ejwrong');
+      });
+
   } else {
-    // Local demo mode — just validate against S
-    if(S.gon && code!==S.gc){ showE('ejwrong'); return; }
+    // ── Local/demo mode ──
+    if(S.gon && code!==S.gc){
+      const el=document.getElementById('ejwrong');
+      if(el) el.textContent='❌ Wrong code.';
+      showE('ejwrong'); return;
+    }
+    if(!S.gon){
+      const el=document.getElementById('ejwrong');
+      if(el) el.textContent='❌ No active game. Ask the host to release a quiz.';
+      showE('ejwrong'); return;
+    }
     _completeJoin(code, pname, null);
   }
 }
 
 function _completeJoin(code, pname, gameData){
-  // If gameData came from Firebase, hydrate S
+  // Hydrate S from Firebase game data
   if(gameData){
     S.gon=true; S.gc=gameData.gc; S.curQ=gameData.curQ||0;
     S.paused=gameData.paused||false; S.revealAns=gameData.revealAns||false;
     if(gameData.aqId){ const found=S.quizzes.find(q=>q.id===gameData.aqId); if(found) S.aq=found; }
   }
+
+  // Pick an emoji — base on current player count in S (will be refreshed by onPlayers listener)
   const emoji=EMOJ[S.players.length%EMOJ.length];
   const playerObj={name:pname, emoji, score:0};
+
+  // Add to local S immediately so UI reflects it right away
   if(!S.players.find(p=>p.name===pname)) S.players.push(playerObj);
   S.me=pname; S.playerCode=code;
-  // Persist player session so a reload doesn't log them out
+
+  // Persist session (survives reload)
   sessionStorage.setItem('qs_player', JSON.stringify({name:pname, emoji, code}));
-  // Write to Firebase so admin and projector see this player
-  if(window._fb&&window._fb.ready()) window._fb.updatePlayer(pname, playerObj);
+
+  // ── Write to Firebase — this is what makes the player appear for the admin ──
+  if(window._fb && window._fb.ready()){
+    window._fb.updatePlayer(pname, playerObj)
+      .then(()=>{ console.log('[QuizStage] Player written to Firebase:', pname); })
+      .catch(err=>{ console.error('[QuizStage] Failed to write player:', err); toast('Connection issue — try rejoining.','er'); });
+  }
+
+  // Unlock lobby + game tabs
   document.getElementById('tlobby').disabled=false;
   document.getElementById('tgame').disabled=false;
   document.getElementById('gcname').textContent=pname;
-  renderOverview(); go('lobby');
+
+  toast('Welcome, '+pname+'! 🎉','ok');
+  renderOverview(); renderLobby(); go('lobby');
 }
 
 // ═══ LOBBY ═══
@@ -1924,22 +1998,26 @@ function clearAns(){document.querySelectorAll('.abtn').forEach(b=>{b.classList.r
     toast('Welcome back, '+saved.name+'! 👋','ok');
   };
 
-  if(window._fb&&window._fb.ready()){
-    const {getDatabase,ref,get}=window._fbModules||{};
-    if(get&&ref){ get(ref(getDatabase(),'quizstage/game')).then(snap=>rejoin(snap.val())).catch(()=>sessionStorage.removeItem('qs_player')); }
-    else rejoin(null);
+  const doRejoin = () => {
+    window._fb.getGame()
+      .then(gameData => rejoin(gameData))
+      .catch(() => sessionStorage.removeItem('qs_player'));
+  };
+
+  if(window._fb && window._fb.ready()){
+    doRejoin();
   } else {
-    // No Firebase — check against local S after a brief delay
-    window.addEventListener('fb-ready',()=>{
-      const {getDatabase,ref,get}=window._fbModules||{};
-      if(get&&ref){ get(ref(getDatabase(),'quizstage/game')).then(snap=>rejoin(snap.val())).catch(()=>{}); }
-    },{once:true});
-    // Also try local-only mode after 2s timeout if FB never fires
+    // Wait for Firebase module to initialise, then rejoin
+    window.addEventListener('fb-ready', doRejoin, {once:true});
+    // Fallback: if Firebase never fires (e.g. blocked), try local S after 3s
     setTimeout(()=>{
-      if(S.me) return; // already rejoined via FB
-      if(S.gon&&S.gc===saved.code) rejoin({gc:S.gc,curQ:S.curQ,paused:S.paused,revealAns:S.revealAns,aqId:S.aq&&S.aq.id});
-      else { sessionStorage.removeItem('qs_player'); }
-    },2500);
+      if(S.me) return; // already rejoined
+      if(S.gon && S.gc===saved.code){
+        rejoin({gc:S.gc, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, status:'active', aqId:S.aq&&S.aq.id});
+      } else {
+        sessionStorage.removeItem('qs_player');
+      }
+    }, 3000);
   }
 })();
 
