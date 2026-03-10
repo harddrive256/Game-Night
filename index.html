@@ -5,6 +5,98 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QuizStage</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script type="module">
+// ─── FIREBASE REALTIME DATABASE ───────────────────────────────────────────
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyAHzOFMSjWelS2llpZVh4Ts83mD9qe10m4",
+  authDomain: "game-night-808f1.firebaseapp.com",
+  databaseURL: "https://game-night-808f1-default-rtdb.firebaseio.com",
+  projectId: "game-night-808f1",
+  storageBucket: "game-night-808f1.firebasestorage.app",
+  messagingSenderId: "730427931065",
+  appId: "1:730427931065:web:f94ae3ac0b52bea1019e68",
+  measurementId: "G-SENJVBZW37"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+
+// ─── INSTRUCTIONS ────────────────────────────────────────────────────────────
+// 1. Go to https://console.firebase.google.com → Create a free project
+// 2. Add a Web App → copy your firebaseConfig values above (replace the demo ones)
+// 3. Go to Realtime Database → Create database → Start in TEST mode
+// 4. That's it — players on any device will now sync in real time!
+// ─────────────────────────────────────────────────────────────────────────────
+
+let app, db, gameRef, playersRef;
+let _fbReady = false;
+
+try {
+  app = initializeApp(firebaseConfig);
+  db  = getDatabase(app);
+  gameRef    = ref(db, 'quizstage/game');
+  playersRef = ref(db, 'quizstage/players');
+  _fbReady = true;
+} catch(e) {
+  console.warn('Firebase init failed — running in local-only demo mode.', e);
+}
+
+// ─── EXPOSE FB HELPERS TO GLOBAL SCOPE ───────────────────────────────────────
+window._fb = {
+  ready: () => _fbReady,
+
+  // Admin writes the full game state
+  pushGame: (gameObj) => {
+    if (!_fbReady) return;
+    if (gameObj === null) return remove(gameRef);
+    return set(gameRef, gameObj);
+  },
+
+  // Admin writes a player list
+  pushPlayers: (arr) => {
+    if (!_fbReady) return;
+    // store as object keyed by name
+    const obj = {};
+    arr.forEach(p => { obj[p.name.replace(/[.#$/\[\]]/g,'')] = p; });
+    return set(playersRef, obj);
+  },
+
+  // Admin adds/updates single player
+  updatePlayer: (name, data) => {
+    if (!_fbReady) return;
+    const key = name.replace(/[.#$/\[\]]/g,'');
+    return update(ref(db, 'quizstage/players/' + key), data);
+  },
+
+  // Listen: called on every game state change (all clients)
+  onGame: (cb) => {
+    if (!_fbReady) return () => {};
+    return onValue(gameRef, snap => cb(snap.val()));
+  },
+
+  // Listen: called on every players change (all clients)
+  onPlayers: (cb) => {
+    if (!_fbReady) return () => {};
+    return onValue(playersRef, snap => {
+      const val = snap.val();
+      cb(val ? Object.values(val) : []);
+    });
+  },
+};
+
+// Signal that Firebase is ready so the main script can subscribe
+window._fbModules = { getDatabase, ref, get };
+window.dispatchEvent(new Event('fb-ready'));
+</script>
 <style>
 :root{--gold:#F5C842;--deep:#0A0A14;--panel:#10101e;--card:#16162a;--card2:#1c1c32;--accent:#5B4CFF;--accent2:#FF4C8B;--safe:#2ECC71;--danger:#E74C3C;--warn:#F39C12;--text:#E8E8F0;--muted:#6B6B88;--border:rgba(255,255,255,0.07);}
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -235,47 +327,32 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
 <!-- JOIN -->
 <div id="screen-join" class="screen">
   <div class="cw">
-    <div class="jcard">
-      <div style="width:68px;height:68px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:30px" id="jicon">🎯</div>
-      <h2 style="font-family:'Bebas Neue',cursive;font-size:31px;letter-spacing:2px;margin-bottom:7px;color:var(--gold)" id="jtitle">Join the Game</h2>
-      <p style="color:var(--muted);font-size:14px;margin-bottom:20px" id="jsub">Enter the game code shown on the main screen.</p>
+    <div class="jcard" style="max-width:460px">
+      <div style="width:72px;height:72px;background:linear-gradient(135deg,var(--accent),var(--accent2));border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 22px;font-size:32px;box-shadow:0 8px 28px rgba(91,76,255,.4)">🎮</div>
+      <h2 style="font-family:'Bebas Neue',cursive;font-size:34px;letter-spacing:2px;margin-bottom:6px;color:var(--gold)">Join the Game</h2>
+      <p style="color:var(--muted);font-size:14px;margin-bottom:26px;line-height:1.6">Enter the game code on the big screen and your name to jump into the lobby.</p>
 
-      <!-- Step 0: No game active -->
-      <div id="jstep0" style="background:rgba(231,76,60,.07);border:1px solid rgba(231,76,60,.22);border-radius:13px;padding:24px">
-        <div style="font-size:34px;margin-bottom:9px">🚫</div>
-        <div style="font-weight:700;font-size:15px;color:var(--danger);margin-bottom:5px">No Active Game</div>
-        <div style="font-size:13px;color:var(--muted);line-height:1.6">The host hasn't released a game yet.</div>
+      <div class="ig">
+        <label class="lbl">Game Code</label>
+        <input class="ifield" id="jcode" maxlength="8" placeholder="QZ-XXXX"
+          oninput="this.value=this.value.toUpperCase()"
+          onkeydown="if(event.key==='Enter')document.getElementById('jname').focus()"
+          style="font-family:'Space Mono',monospace;font-size:24px;letter-spacing:7px;text-align:center;text-transform:uppercase;padding:14px">
+        <div class="emsg" id="ejcode">Please enter the game code.</div>
       </div>
 
-      <!-- Step 1: Enter code -->
-      <div id="jstep1" style="display:none;text-align:left">
-        <div class="ig">
-          <label class="lbl">Game Code</label>
-          <input class="ifield" id="jcode" maxlength="8" placeholder="QZ-XXXX" oninput="this.value=this.value.toUpperCase()" style="font-family:'Space Mono',monospace;font-size:22px;letter-spacing:6px;text-align:center;text-transform:uppercase" onkeydown="if(event.key==='Enter')doCheckCode()">
-          <div class="emsg" id="ejcode">Please enter the game code.</div>
-          <div class="emsg" id="ejwrong">❌ Code doesn't match. Try again.</div>
-        </div>
-        <button class="btn btn-primary btn-block" style="margin-bottom:9px" onclick="doCheckCode()">Continue →</button>
-        <p style="text-align:center;font-size:12px;color:var(--muted)">No app needed — works in any browser</p>
+      <div class="ig">
+        <label class="lbl">Your Name</label>
+        <input class="ifield" id="jname" placeholder="What should we call you?"
+          onkeydown="if(event.key==='Enter')doJoin()"
+          style="font-size:16px;padding:13px 14px">
+        <div class="emsg" id="ejname">Please enter your name.</div>
       </div>
 
-      <!-- Step 2: Enter name -->
-      <div id="jstep2" style="display:none;text-align:left">
-        <div style="background:rgba(91,76,255,.08);border:1px solid rgba(91,76,255,.25);border-radius:11px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">
-          <span style="font-size:20px">✅</span>
-          <div>
-            <div style="font-size:12px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600">Code Accepted</div>
-            <div id="j2code" style="font-family:'Space Mono',monospace;font-size:16px;color:var(--gold);letter-spacing:3px"></div>
-          </div>
-        </div>
-        <div class="ig">
-          <label class="lbl">Your Name</label>
-          <input class="ifield" id="jname" placeholder="What should we call you?" onkeydown="if(event.key==='Enter')doJoin()">
-          <div class="emsg" id="ejname">Please enter your name.</div>
-        </div>
-        <button class="btn btn-primary btn-block" style="margin-bottom:9px" onclick="doJoin()">🚀 Enter Lobby</button>
-        <button class="btn btn-ghost btn-block btn-sm" onclick="renderJoin()">← Back</button>
-      </div>
+      <div class="emsg" id="ejwrong" style="text-align:center;margin-bottom:14px;font-size:13px;padding:10px;background:rgba(231,76,60,.07);border-radius:9px;border:1px solid rgba(231,76,60,.2)">❌ Code not recognised. Double-check the screen.</div>
+
+      <button class="btn btn-primary btn-block" style="padding:14px;font-size:16px;border-radius:12px;margin-bottom:10px" id="join-submit-btn" onclick="doJoin()">🚀 Enter Lobby</button>
+      <p style="text-align:center;font-size:12px;color:var(--muted);line-height:1.7">No app download needed · Works on any device</p>
     </div>
   </div>
 </div>
@@ -417,10 +494,72 @@ const ICONS=['🌍','🔬','🎬','🏛️','⚽','🎵','🧠','🚀','🎯','�
 const DC={easy:'var(--safe)',mixed:'#5DADE2',medium:'#5DADE2',hard:'var(--danger)'};
 let S={
   ain:false, gon:false, gc:null, aq:null,
-  players:[], me:null,
+  players:[], me:null, playerCode:null,
   quizzes:[], eqid:null, eqs:[], eqi:-1, qf:'all',
   curQ:0, paused:false, revealAns:false, curStep:70
 };
+
+// ═══ FIREBASE SYNC ═══
+// Called once Firebase module signals it's ready
+function initFirebaseSync() {
+  const fb = window._fb;
+  if (!fb || !fb.ready()) return; // demo mode — local only
+
+  // ── Listen: game state → sync into S and re-render ──
+  fb.onGame(gameData => {
+    if (!gameData) {
+      // Game ended or never started
+      if (S.gon) {
+        S.gon=false; S.gc=null; S.aq=null;
+        S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70;
+        // If player was in lobby/game, show them the "no game" state
+        if (!S.ain) {
+          document.getElementById('tlobby').disabled=true;
+          document.getElementById('tgame').disabled=true;
+          go('join');
+          toast('The host has ended the game.','nf');
+        }
+        renderOverview(); renderProj(); renderSession();
+      }
+      return;
+    }
+    const prev = S.gon;
+    S.gon      = true;
+    S.gc       = gameData.gc;
+    S.curQ     = gameData.curQ   || 0;
+    S.paused   = gameData.paused || false;
+    S.revealAns= gameData.revealAns || false;
+    S.curStep  = gameData.curStep || 70;
+    // Re-attach the quiz object from local quizzes list
+    if (gameData.aqId) {
+      const found = S.quizzes.find(q => q.id === gameData.aqId);
+      if (found) S.aq = found;
+    }
+    // If a player is in the lobby waiting, kick them to the game when it starts
+    if (!S.ain && S.me && !gameData.paused && S.playerCode === S.gc) {
+      if (document.getElementById('screen-lobby').classList.contains('active')) {
+        // already in lobby — just re-render to show latest state
+      }
+    }
+    renderOverview(); renderProj(); renderSession(); renderLobby();
+  });
+
+  // ── Listen: players list → sync into S.players and re-render ──
+  fb.onPlayers(playerArr => {
+    S.players = playerArr;
+    renderOverview(); renderLobby(); renderProj(); renderScores(); renderCameras();
+    // keep my own score in sync
+    if (S.me) {
+      const me = S.players.find(p => p.name === S.me);
+      if (me) document.getElementById('gcname') && (document.getElementById('gcname').textContent = me.name);
+    }
+  });
+}
+
+// Subscribe when FB module fires its ready event, or immediately if already fired
+window.addEventListener('fb-ready', initFirebaseSync);
+// Also try immediately in case the module already loaded synchronously
+if (window._fb && window._fb.ready()) initFirebaseSync();
 function uid(){return 'q'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
 function mkc(){const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='QZ-';for(let i=0;i<4;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
 function x(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
@@ -554,23 +693,27 @@ function releaseGame(){
   if(!sel||!sel.value){toast('Select a quiz first','er');return;}
   const q=S.quizzes.find(z=>z.id===sel.value);
   if(!q)return;
-  S.gon=true;S.gc=mkc();S.aq=q;S.players=[];
-  S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=70;
-  renderOverview();renderProj();
-  toast('Game released! Code: '+S.gc,'ok');
+  S.gon=true; S.gc=mkc(); S.aq=q; S.players=[];
+  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70;
+  const gameData={ gc:S.gc, aqId:q.id, curQ:0, paused:false, revealAns:false, curStep:70, status:'active' };
+  if(window._fb&&window._fb.ready()){ window._fb.pushGame(gameData); window._fb.pushPlayers([]); }
+  renderOverview(); renderProj();
+  toast('Game live! Code: '+S.gc,'ok');
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
-  S.gon=false;S.gc=null;S.aq=null;S.players=[];S.me=null;
-  S.curQ=0;S.paused=false;S.revealAns=false;
+  S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
+  S.curQ=0; S.paused=false; S.revealAns=false;
   document.getElementById('tlobby').disabled=true;
   document.getElementById('tgame').disabled=true;
-  renderOverview();renderProj();renderSession();
+  if(window._fb&&window._fb.ready()){ window._fb.pushGame(null); window._fb.pushPlayers([]); }
+  renderOverview(); renderProj(); renderSession();
   toast('Session ended.','nf');
 }
 function adjScore(playerIdx, delta){
   if(!S.players[playerIdx])return;
   S.players[playerIdx].score=(S.players[playerIdx].score||0)+delta;
+  if(window._fb&&window._fb.ready()) window._fb.updatePlayer(S.players[playerIdx].name, { score: S.players[playerIdx].score });
   renderProj();renderScores();
   toast(x(S.players[playerIdx].name)+': '+(delta>0?'+':'')+delta+' pts','nf');
 }
@@ -750,6 +893,8 @@ function relFromLib(id){
   const q=S.quizzes.find(z=>z.id===id);if(!q)return;
   S.gon=true;S.gc=mkc();S.aq=q;S.players=[];
   S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=70;
+  const gameData={ gc:S.gc, aqId:q.id, curQ:0, paused:false, revealAns:false, curStep:70, status:'active' };
+  if(window._fb&&window._fb.ready()){ window._fb.pushGame(gameData); window._fb.pushPlayers([]); }
   aTab('overview',document.querySelectorAll('.anav')[0]);
   renderProj();
   toast('Game released! Code: '+S.gc,'ok');
@@ -810,19 +955,21 @@ function sessionNext(){
   const totalQ=S.aq.questions?S.aq.questions.length:0;
   if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;}
   else{toast('Last question reached.','nf');return;}
-  // Update curStep on ladder
   const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active' });
   renderSession();renderProj();
   toast('Moved to Q'+(S.curQ+1),'ok');
 }
 function sessionPause(){
   S.paused=!S.paused;
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active' });
   renderSession();
   toast(S.paused?'Game paused.':'Game resumed.','nf');
 }
 function toggleReveal(){
   S.revealAns=!S.revealAns;
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active' });
   renderSession();renderProj();
   toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
@@ -898,58 +1045,84 @@ function renderArch(){
   document.getElementById('ap-arch').innerHTML=h;
 }
 
-// ═══ JOIN ═══
 function renderJoin(){
-  const s0=document.getElementById('jstep0');
-  const s1=document.getElementById('jstep1');
-  const s2=document.getElementById('jstep2');
-  const sub=document.getElementById('jsub');
-  s0.style.display='none'; s1.style.display='none'; s2.style.display='none';
-  if(!S.gon){
-    s0.style.display='block';
-    sub.textContent='The host controls when a game starts.';
+  ['ejcode','ejname','ejwrong'].forEach(hideE);
+  const jc=document.getElementById('jcode');
+  const jn=document.getElementById('jname');
+  if(jc) jc.value='';
+  if(jn) jn.value='';
+  setTimeout(()=>{ if(jc) jc.focus(); },80);
+}
+function doCheckCode(){ doJoin(); }
+function doJoin(){
+  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase();
+  const pname=(document.getElementById('jname')||{value:''}).value.trim();
+  ['ejcode','ejname','ejwrong'].forEach(hideE);
+  let ok=true;
+  if(!code){showE('ejcode');ok=false;}
+  if(!pname){showE('ejname');ok=false;}
+  if(!ok) return;
+
+  const fb=window._fb;
+
+  // If Firebase is ready, validate code against live game in DB
+  if(fb && fb.ready()){
+    // Disable button to prevent double-join
+    const btn=document.getElementById('join-submit-btn');
+    if(btn){ btn.disabled=true; btn.textContent='Joining…'; }
+
+    // Read the current game from Firebase once to validate
+    const { getDatabase, ref, get } = window._fbModules || {};
+    if(get && ref){
+      const db=getDatabase();
+      get(ref(db,'quizstage/game')).then(snap=>{
+        const gameData=snap.val();
+        if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
+        if(!gameData){ showE('ejwrong'); document.getElementById('ejwrong').textContent='❌ No active game right now. Ask your host!'; return; }
+        if(code !== gameData.gc){ showE('ejwrong'); document.getElementById('ejwrong').textContent='❌ Wrong code. Check the big screen!'; return; }
+        _completeJoin(code, pname, gameData);
+      }).catch(()=>{ if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; } showE('ejwrong'); });
+    } else {
+      // Firebase ready but get not exposed — fall back
+      if(S.gon && code!==S.gc){ showE('ejwrong'); return; }
+      _completeJoin(code, pname, null);
+    }
   } else {
-    s1.style.display='block';
-    sub.textContent='Enter the game code shown on the main screen.';
-    const jc=document.getElementById('jcode');
-    if(jc) jc.value='';
-    ['ejcode','ejwrong'].forEach(hideE);
+    // Local demo mode — just validate against S
+    if(S.gon && code!==S.gc){ showE('ejwrong'); return; }
+    _completeJoin(code, pname, null);
   }
 }
-function doCheckCode(){
-  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase();
-  hideE('ejcode'); hideE('ejwrong');
-  if(!code){showE('ejcode');return;}
-  if(!S.gon||code!==S.gc){showE('ejwrong');return;}
-  // Move to step 2
-  document.getElementById('jstep1').style.display='none';
-  document.getElementById('jstep2').style.display='block';
-  document.getElementById('j2code').textContent=code;
-  document.getElementById('jsub').textContent='Almost there — tell us your name!';
-  const jn=document.getElementById('jname');
-  if(jn){jn.value='';jn.focus();}
-  hideE('ejname');
-}
-function doJoin(){
-  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase()||S.gc;
-  const pname=(document.getElementById('jname')||{value:''}).value.trim();
-  hideE('ejname');
-  if(!pname){showE('ejname');return;}
-  S.players.push({name:pname,emoji:EMOJ[S.players.length%EMOJ.length],score:0});
-  S.me=pname;
+
+function _completeJoin(code, pname, gameData){
+  // If gameData came from Firebase, hydrate S
+  if(gameData){
+    S.gon=true; S.gc=gameData.gc; S.curQ=gameData.curQ||0;
+    S.paused=gameData.paused||false; S.revealAns=gameData.revealAns||false;
+    if(gameData.aqId){ const found=S.quizzes.find(q=>q.id===gameData.aqId); if(found) S.aq=found; }
+  }
+  const emoji=EMOJ[S.players.length%EMOJ.length];
+  const playerObj={name:pname, emoji, score:0};
+  if(!S.players.find(p=>p.name===pname)) S.players.push(playerObj);
+  S.me=pname; S.playerCode=code;
+  // Write to Firebase so admin and projector see this player
+  if(window._fb&&window._fb.ready()) window._fb.updatePlayer(pname, playerObj);
   document.getElementById('tlobby').disabled=false;
   document.getElementById('tgame').disabled=false;
   document.getElementById('gcname').textContent=pname;
-  renderOverview();
-  go('lobby');
+  renderOverview(); go('lobby');
 }
 
 // ═══ LOBBY ═══
 function renderLobby(){
-  document.getElementById('lcode').textContent=S.gc||'——';
+  const displayCode=S.gc||S.playerCode||'——';
+  document.getElementById('lcode').textContent=displayCode;
   document.getElementById('lcnt').textContent=S.players.length+' waiting';
   const el=document.getElementById('llist');
-  if(!S.players.length){el.innerHTML='<div style="text-align:center;padding:18px;color:var(--muted);font-size:14px;background:var(--panel);border-radius:10px;border:1px dashed var(--border)">No players yet 🎉</div>';return;}
+  if(!S.players.length){
+    el.innerHTML='<div style="text-align:center;padding:18px;color:var(--muted);font-size:14px;background:var(--panel);border-radius:10px;border:1px dashed var(--border)">No players yet 🎉</div>';
+    return;
+  }
   el.innerHTML=S.players.map(p=>'<div class="player-row"><div class="player-avi">'+p.emoji+'</div><div style="flex:1;font-size:14px;font-weight:600">'+x(p.name)+'</div>'+(p.name===S.me?'<span style="font-size:11px;color:var(--accent);font-weight:700;background:rgba(91,76,255,.15);padding:2px 8px;border-radius:20px">YOU</span>':'')+'<div class="odot"></div></div>').join('');
 }
 
