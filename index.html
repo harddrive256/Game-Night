@@ -1338,18 +1338,19 @@ async function rtcStartReceive(pname) {
     const stream = e.streams && e.streams[0];
     if (!stream) return;
     console.log('[WebRTC] ✅ Track received for', pname);
-    // Save as a real MediaStream so _attachMedia wires srcObject (not canvas)
+    // Save the real MediaStream so _attachMedia can wire it on future renders
     S.streams[pname] = stream;
-    // Wire to every existing video element for this player immediately
+    // Wire to any already-rendered video elements for this player right now
     document.querySelectorAll('video[data-player="'+CSS.escape(pname)+'"]').forEach(v => {
       v.srcObject = stream;
       v.play().catch(() => {});
-      // Hide placeholder
-      const ph = v.closest('[style*="position:absolute"]') ?
-        v.parentElement.querySelector('[id^="proj-ph"], [id="proj-vid-ph"]') : null;
+      // Hide emoji placeholder
+      const ph = document.getElementById('proj-vid-ph') || document.getElementById('proj-ph-0');
       if(ph){ ph.style.opacity='0'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
     });
-    renderProj(); renderCameras();
+    // Re-render projection so the video element is created fresh and wired
+    renderProj();
+    renderCameras();
     if (S.ain) toast('📹 '+x(pname)+' live via WebRTC', 'ok');
   };
 
@@ -1973,9 +1974,8 @@ function attachStream(videoEl, playerName){
 async function requestCameraForPlayer(){ return null; }
 
 // ── Build the right media element for a player slot ──
-// Always use <video> for projection so both local MediaStreams and WebRTC remote
-// tracks (which arrive as MediaStreams via ontrack) can be set via srcObject.
-// <canvas> is only used in the admin Camera Feeds thumbnail grid.
+// Always <video> so WebRTC MediaStream can be assigned via srcObject.
+// Canvas was the old approach for BroadcastChannel relay — WebRTC doesn't need it.
 function _mediaEl(id, pname, styleExtra){
   const style = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000;' + (styleExtra||'');
   return '<video id="'+id+'" data-player="'+x(pname)+'" autoplay playsinline muted style="'+style+'"></video>';
@@ -1989,45 +1989,25 @@ function _attachMedia(id, pname){
   const stream = S.streams[pname];
 
   if(stream instanceof MediaStream){
-    // Local (same-tab camera) or WebRTC remote stream — both are real MediaStreams
+    // Real MediaStream — wire srcObject directly (same-tab local or WebRTC remote)
     if(el.tagName === 'VIDEO'){
       el.srcObject = stream;
       el.play().catch(()=>{});
       el.onplaying = () => {
-        // Hide emoji placeholder once video is playing
-        const phId = id === 'proj-vid-main' ? 'proj-vid-ph'
-                   : id.startsWith('proj-vid-') ? 'proj-ph-' + id.replace('proj-vid-','')
-                   : null;
-        if(phId){
-          const ph = document.getElementById(phId);
-          if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
-        }
+        const phId = (id === 'proj-vid-main') ? 'proj-vid-ph'
+                   : id.replace('proj-vid-', 'proj-ph-');
+        const ph = document.getElementById(phId);
+        if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
       };
     }
-  } else if(stream){
-    // 'remote' sentinel — we may be mid-WebRTC handshake; try to wire the answerer stream
-    const pc = window._rtcAnswerers && window._rtcAnswerers[pname];
-    if(pc){
-      // If ontrack already fired, the stream is in the receivers object
-      const recv = pc.getReceivers ? pc.getReceivers() : [];
-      if(recv.length){
-        const tracks = recv.map(r=>r.track).filter(Boolean);
-        if(tracks.length){
-          const ms = new MediaStream(tracks);
-          S.streams[pname] = ms;
-          if(el.tagName === 'VIDEO'){ el.srcObject = ms; el.play().catch(()=>{}); }
-        }
-      }
-    }
-    // Also paint last canvas frame if available (same-browser BroadcastChannel relay)
-    if(el.tagName === 'CANVAS'){
-      const lastBmp = window._camCanvases&&window._camCanvases[pname]&&window._camCanvases[pname].lastBmp;
-      if(lastBmp){
-        el.width  = el.offsetWidth  || 480;
-        el.height = el.offsetHeight || 270;
-        try { el.getContext('2d').drawImage(lastBmp,0,0,el.width,el.height); } catch(e){}
-      }
-    }
+  } else if(stream === 'remote'){
+    // WebRTC handshake in progress — stream will arrive via ontrack and be wired
+    // directly to this video element via querySelectorAll('video[data-player]').
+    // Just hide the placeholder now so it doesn't cover the incoming video.
+    const phId = (id === 'proj-vid-main') ? 'proj-vid-ph'
+               : id.replace('proj-vid-', 'proj-ph-');
+    const ph = document.getElementById(phId);
+    if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .4s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },400); }
   }
 }
 
@@ -2179,7 +2159,7 @@ function _renderProjSingle(el, qd){
     }
     h+='</div></div>';
     // Still render the question behind the overlay so they can see the answer
-    h+='<div style="position:absolute;bottom:16px;left:14px;right:182px;z-index:30;opacity:.55;pointer-events:none">';
+    h+='<div style="position:absolute;bottom:16px;left:14px;right:216px;z-index:30;opacity:.55;pointer-events:none">';
     h+='<div style="background:rgba(0,0,0,.95);border:2px solid rgba(231,76,60,.4);border-radius:16px;padding:14px 18px">';
     h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">';
     if(qd) qd.answers.forEach((a,i)=>{
@@ -2200,73 +2180,41 @@ function _renderProjSingle(el, qd){
     return;
   }
 
-  // ── RIGHT SIDE: Ladder — 0 at bottom, +10 per correct answer, fills full height ──
-  // Steps: 0, 10, 20, 30, … 150 (16 rungs). Safety floors at 50 and 100.
-  // The current rung is the player's current score (tp.score).
-  const ladderMax  = 150;
-  const ladderStep = 10;
-  const sf         = [50, 100]; // safety checkpoints
-  const currentScore = tp.score || 0;
-  // Build array bottom→top: [0, 10, 20, … 150]
-  const steps = [];
-  for(let v = 0; v <= ladderMax; v += ladderStep) steps.push(v);
-  // Render top→bottom in DOM (reverse so visual top = highest value)
-  const displaySteps = [...steps].reverse();
-  const totalRungs   = steps.length; // 16
-  h+='<div style="position:absolute;top:14px;right:14px;bottom:14px;width:150px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  // ── RIGHT SIDE: Ladder — 0 at bottom, +10 per correct answer ──
+  // 16 rungs: 0,10,20…150. Highlighted rung = player's current score.
+  // Safety checkpoints at 50 and 100.
+  const ladderSteps=[0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
+  const sf=[50,100];
+  const currentScore = tp.score||0;
+  const displaySteps=[...ladderSteps].reverse(); // top of DOM = highest value
+  h+='<div style="position:absolute;top:14px;right:10px;bottom:4px;width:190px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
   h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
-  h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:2px 5px 4px">';
-  displaySteps.forEach(v => {
-    const isCurrent = v === currentScore;
-    const isPast    = v < currentScore;
-    const isSafe    = sf.includes(v);
-    const isFuture  = v > currentScore;
-    const bg  = isCurrent ? 'background:rgba(245,200,66,.22);'
-               : isPast   ? 'background:rgba(46,204,113,.06);'
+  h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 6px 4px">';
+  displaySteps.forEach(v=>{
+    const isCur  = v===currentScore;
+    const isPast = v < currentScore;
+    const isSafe = sf.includes(v);
+    const bg  = isCur  ? 'background:rgba(245,200,66,.22);'
+               : isPast ? 'background:rgba(46,204,113,.06);'
                : '';
-    const bdr = isCurrent ? 'border:1px solid rgba(245,200,66,.6);'
-               : isSafe && !isPast ? 'border:1px solid rgba(46,204,113,.25);'
+    const bdr = isCur  ? 'border:1.5px solid rgba(245,200,66,.7);'
+               : isSafe&&!isPast ? 'border:1px solid rgba(46,204,113,.3);'
                : 'border:1px solid transparent;';
-    const col = isCurrent ? 'color:var(--gold);font-weight:700;'
-               : isPast   ? 'color:rgba(46,204,113,.6);'
-               : isSafe   ? 'color:var(--safe);'
-               : isFuture ? 'color:rgba(255,255,255,.32);'
-               : 'color:rgba(255,255,255,.4);';
-    const icon = isCurrent ? '▶' : isPast ? '✓' : isSafe ? '🛡' : '';
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:0 5px;border-radius:4px;flex:1;min-height:0;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:8px;">';
-    h+='<span style="min-width:14px;text-align:center;flex-shrink:0">'+icon+'</span>';
-    h+='<span style="flex:1;padding:0 2px">'+(isSafe&&!isPast?'<span style="font-size:7px">🛡 </span>':'')+v+' pts</span>';
+    const col = isCur  ? 'color:var(--gold);font-weight:700;'
+               : isPast ? 'color:rgba(46,204,113,.6);'
+               : isSafe ? 'color:var(--safe);'
+               : 'color:rgba(255,255,255,.32);';
+    const icon = isCur ? '▶' : isPast ? '✓' : isSafe ? '🛡' : '';
+    h+='<div style="display:flex;align-items:center;padding:0 5px;border-radius:5px;flex:1;min-height:0;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:9px;">';
+    h+='<span style="width:16px;text-align:center;flex-shrink:0;font-size:8px">'+icon+'</span>';
+    h+='<span style="flex:1;padding:0 3px;font-size:9px">'+v+' pts</span>';
+    if(isSafe&&!isPast) h+='<span style="font-size:8px;color:var(--safe);opacity:.7">SAFE</span>';
     h+='</div>';
   });
   h+='</div></div>';
 
-  // ── BOTTOM: Lifelines bar (above question card) + Question card ──
-  h+='<div style="position:absolute;bottom:14px;left:14px;right:180px;z-index:20;display:flex;flex-direction:column;gap:8px">';
-
-  // ── LIFELINES ROW — prominent buttons above the question card ──
-  if(!S.paused){
-    const llAdmin = S.ain || localStorage.getItem('qs_admin')==='1';
-    const llBtn = (icon, label, used, fn) => {
-      const base = 'flex:1;padding:8px 6px;border-radius:11px;border:2px solid;display:flex;flex-direction:column;align-items:center;gap:3px;transition:all .25s;backdrop-filter:blur(6px);font-family:DM Sans,sans-serif;';
-      const style = used
-        ? base+'opacity:.2;filter:grayscale(1);cursor:default;background:rgba(0,0,0,.3);border-color:rgba(255,255,255,.08);'
-        : llAdmin
-          ? base+'cursor:pointer;background:rgba(245,200,66,.08);border-color:rgba(245,200,66,.35);'
-          : base+'cursor:default;background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.12);opacity:.7;';
-      const onclick = (!used && llAdmin) ? 'onclick="'+fn+'()"' : '';
-      return '<button '+onclick+' '+(used||!llAdmin?'disabled':'')+' title="'+label+'" style="'+style+'">'
-        +'<span style="font-size:20px">'+icon+'</span>'
-        +'<span style="font-size:9px;color:'+(used?'rgba(255,255,255,.3)':'rgba(255,255,255,.6)')+';letter-spacing:.5px;font-weight:600;text-transform:uppercase">'+(used?'USED':label.split('—')[0].trim())+'</span>'
-        +'</button>';
-    };
-    h+='<div style="display:flex;gap:7px">';
-    h+=llBtn('🪙','50:50 — Remove 2 wrong answers', ll.fifty, 'useFiftyFifty');
-    h+=llBtn('📞','Phone — Ask someone',             ll.ask,   'useAskAnyone');
-    h+=llBtn('⏭️','Skip — Pass this question',      ll.skip,  'useSkip');
-    h+='</div>';
-  }
-
-  // ── QUESTION CARD ──
+  // ── BOTTOM: Question card (left of ladder) ──
+  h+='<div style="position:absolute;bottom:14px;left:14px;right:216px;z-index:20">';
   h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:16px;padding:14px 18px;backdrop-filter:blur(14px)">';
 
   // Quiz title bar
@@ -2276,34 +2224,63 @@ function _renderProjSingle(el, qd){
     h+='<div style="font-size:clamp(18px,2vw,24px);font-weight:700;color:var(--warn);text-align:center;padding:14px 0;letter-spacing:3px">⏸ PAUSED</div>';
   } else {
 
+    // ── LIFELINES — ghost/transparent, floating above question ──
+    // Shown always so audience sees remaining lifelines.
+    // Only clickable by admin. Used ones become near-invisible.
+    const llBtn = (icon, title, used, fn) => {
+      // Active: semi-transparent background, full emoji opacity
+      // Used:   nearly invisible — just a ghost outline
+      const s = used
+        ? 'opacity:.18;filter:grayscale(1);cursor:default;background:transparent;border-color:rgba(255,255,255,.08);'
+        : (S.ain || localStorage.getItem('qs_admin')==='1')
+          ? 'opacity:.85;background:rgba(0,0,0,.35);border-color:rgba(255,255,255,.22);cursor:pointer;'
+          : 'opacity:.75;background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.15);cursor:default;';
+      const llAdmin = S.ain || localStorage.getItem('qs_admin')==='1';
+      return '<button '+(used||!llAdmin?'disabled':('onclick="'+fn+'()"'))
+        +' title="'+title+'"'
+        +' style="width:38px;height:38px;border-radius:10px;border:1px solid;font-size:20px;'
+        +s+'display:flex;align-items:center;justify-content:center;transition:all .25s;backdrop-filter:blur(4px);">'
+        +icon+'</button>';
+    };
+    h+='<div style="display:flex;gap:5px;align-items:center;margin-bottom:10px">';
+    h+='<span style="font-size:8px;color:rgba(255,255,255,.28);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-right:3px">Lifelines</span>';
+    h+=llBtn('🪙','50:50 — Remove two wrong answers', ll.fifty,'useFiftyFifty');
+    h+=llBtn('📞','Ask Anyone — Consult someone',     ll.ask,  'useAskAnyone');
+    h+=llBtn('⏭️','Skip — Pass this question',        ll.skip, 'useSkip');
+    h+='</div>';
+
     // Question text
     h+='<div style="font-size:clamp(11px,1.3vw,17px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:10px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
 
-    // Answers grid — 2×2, only admin can click
-    const isAdmin = S.ain || localStorage.getItem('qs_admin')==='1';
+    // Answers grid — 2×2
+    // Admin clicks to pick the answer; others see result only
+    const isAdminHere = S.ain || localStorage.getItem('qs_admin')==='1';
     h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
     (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
       const isHidden  = hidden.includes(i) && !revealed;
       const isCorrect = qd && i===qd.correct;
       const isPicked  = picked!==null && i===picked;
       const isWrong   = isPicked && !isCorrect;
-      let bg,bdr,col,cursor='';
+      let bg,bdr,col;
       if(isHidden){       bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.04)'; col='rgba(255,255,255,.1)'; }
-      else if(!revealed){ bg='rgba(255,255,255,.07)'; bdr='rgba(255,255,255,.13)'; col='#fff'; cursor=isAdmin?'cursor:pointer;':''; }
+      else if(!revealed){ bg='rgba(255,255,255,.07)'; bdr='rgba(255,255,255,.13)'; col='#fff'; }
       else if(isCorrect){ bg='rgba(46,204,113,.22)';  bdr='rgba(46,204,113,.85)';  col='var(--safe)'; }
       else if(isWrong){   bg='rgba(231,76,60,.18)';   bdr='rgba(231,76,60,.8)';    col='var(--danger)'; }
       else{               bg='rgba(255,255,255,.03)'; bdr='rgba(255,255,255,.05)'; col='rgba(255,255,255,.22)'; }
       const lBg  = isHidden?'rgba(255,255,255,.04)':!revealed?'rgba(255,255,255,.1)':isCorrect?'rgba(46,204,113,.35)':isWrong?'rgba(231,76,60,.35)':'rgba(255,255,255,.05)';
       const lCol = isHidden?'rgba(255,255,255,.1)':!revealed?'var(--gold)':isCorrect?'var(--safe)':isWrong?'var(--danger)':'rgba(255,255,255,.18)';
       const shadow=(isCorrect&&revealed)?'box-shadow:0 0 14px rgba(46,204,113,.3);':(isWrong)?'box-shadow:0 0 12px rgba(231,76,60,.28);':'';
-      // Only admin can click; others just see the result
-      const clickable = !revealed && !isHidden && isAdmin;
-      h+='<div '+(clickable?'onclick="projPickAnswer('+i+')"':'')+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:10px;padding:8px 11px;display:flex;align-items:center;gap:7px;transition:all .3s;'+cursor+(clickable?'user-select:none;':'')+shadow+'">';
+      // Only admin can click; use <button> for guaranteed click handling
+      const canClick = isAdminHere && !revealed && !isHidden;
+      const tag = canClick ? 'button' : 'div';
+      const clickAttr = canClick ? 'onclick="projPickAnswer('+i+')"' : '';
+      const cursorStyle = canClick ? 'cursor:pointer;' : 'cursor:default;';
+      h+='<'+tag+' '+clickAttr+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:10px;padding:8px 11px;display:flex;align-items:center;gap:7px;transition:all .3s;width:100%;text-align:left;'+cursorStyle+shadow+'">';
       h+='<div style="width:24px;height:24px;border-radius:5px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
       h+='<div style="font-size:11px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
       if(isCorrect&&revealed) h+='<span style="font-size:13px">✅</span>';
       if(isWrong)             h+='<span style="font-size:13px">❌</span>';
-      h+='</div>';
+      h+='</'+tag+'>';
     });
     h+='</div>';
 
@@ -2318,8 +2295,7 @@ function _renderProjSingle(el, qd){
     }
   }
 
-  h+='</div></div>'; // close question card inner + question card div
-  h+='</div>';       // close the outer column wrapper (lifelines + question card)
+  h+='</div></div>';
   el.innerHTML=h;
   _attachMedia('proj-vid-main', tp.name);
 }
@@ -2724,8 +2700,8 @@ function renderSession(){
 }
 // ── Admin clicks an answer on the projection (single player mode) ──
 // ─── Checkpoint system ───
-// Safety checkpoints at 50 and 100 pts.
-// If a player answers wrong their score drops to the highest checkpoint they've passed.
+// Safety checkpoints at 50 and 100 pts (like Millionaire £1k / £32k floors).
+// If a player answers wrong their score drops to the highest checkpoint they passed.
 function _applyCheckpoint(currentScore){
   if(currentScore >= 100) return 100;
   if(currentScore >= 50)  return 50;
@@ -2743,18 +2719,19 @@ function projPickAnswer(idx){
 
   S.pickedAns = idx;
   const isCorrect = idx === qd.correct;
-  const POINTS_PER_CORRECT = 10;
 
   if(isCorrect){
+    const pts = 10; // always +10 per correct answer; ladder tracks by score
     if(S.players[0]){
-      S.players[0].score = (S.players[0].score||0) + POINTS_PER_CORRECT;
+      S.players[0].score = (S.players[0].score||0) + pts;
       if(window._fb&&window._fb.ready())
         window._fb.updatePlayer(S.players[0].name, { score: S.players[0].score, emoji: S.players[0].emoji });
-      toast('✅ Correct! +'+POINTS_PER_CORRECT+' pts → '+(S.players[0].score)+' total','ok');
+      toast('✅ Correct! +'+pts+' pts → '+(S.players[0].score)+' total','ok');
     }
-    _pushGameState();
+    // Push state then auto-advance after 2.5s
+    if(window._fb&&window._fb.ready())
+      window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:idx, lifelines:S.lifelines, mpBonus:S.mpBonus, gameOver:false });
     renderProj(); updateFloatBar(); renderSession();
-    // Auto-advance after 2.5s
     setTimeout(() => {
       if(S.pickedAns === null) return;
       projNextQuestion();
@@ -2769,14 +2746,16 @@ function projPickAnswer(idx){
       p.score = safeScore;
       if(window._fb&&window._fb.ready())
         window._fb.updatePlayer(p.name, { score: safeScore, emoji: p.emoji });
+      // Toast with checkpoint info
       if(safeScore > 0){
-        toast('❌ Wrong! Score protected at '+safeScore+' pts by checkpoint','er');
+        toast('❌ Wrong! Score protected at '+safeScore+' pts (checkpoint)','er');
       } else {
-        toast('❌ Wrong! No checkpoint reached — 0 pts','er');
+        toast('❌ Wrong! No checkpoint reached — score is 0','er');
       }
     }
     S.gameOver = true;
-    _pushGameState();
+    if(window._fb&&window._fb.ready())
+      window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:idx, lifelines:S.lifelines, mpBonus:S.mpBonus, gameOver:true });
     renderProj(); updateFloatBar(); renderSession();
   }
 }
@@ -2791,9 +2770,10 @@ function projNextQuestion(){
     S.revealAns = false;
     S.mpBonus   = false;
     if(S.lifelines) S.lifelines.hiddenAnswers = [];
-    // curStep is kept for Firebase compatibility but doesn't drive scoring
-    S.curStep = S.curQ * 10;
-    _pushGameState();
+    const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
+    S.curStep = steps[S.curQ] || steps[steps.length-1];
+    if(window._fb&&window._fb.ready())
+      window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null, lifelines:S.lifelines, mpBonus:false });
     renderProj(); renderSession(); updateFloatBar();
     toast('▶ Q'+(S.curQ+1),'ok');
   } else {
@@ -2808,8 +2788,9 @@ function sessionNext(){
   const totalQ=S.aq.questions?S.aq.questions.length:0;
   if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;S.pickedAns=null;S.mpBonus=false;if(S.lifelines)S.lifelines.hiddenAnswers=[];}
   else{toast('Last question reached.','nf');return;}
-  S.curStep=S.curQ*10;
-  _pushGameState();
+  const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
+  S.curStep=steps[S.curQ]||steps[steps.length-1];
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null });
   renderSession();renderProj();updateFloatBar();
   toast('Moved to Q'+(S.curQ+1),'ok');
 }
