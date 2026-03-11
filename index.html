@@ -6,9 +6,12 @@
 <title>QuizStage</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <script type="module">
-// Free tier: 1GB storage, 10GB/month transfer, 100 simultaneous connections
+// ─── FIREBASE REALTIME DATABASE ───────────────────────────────────────────
+// REPLACE the firebaseConfig below with your real project values from:
+// Firebase Console → Project Settings → Your Apps → SDK setup → Config
+// ─────────────────────────────────────────────────────────────────────────
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, set, onValue, update, remove, get }
+import { getDatabase, ref, set, onValue, remove, get }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const firebaseConfig = {
@@ -22,86 +25,66 @@ const firebaseConfig = {
   measurementId: "G-SENJVBZW37"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
+function sanitiseKey(s){ return String(s).replace(/[.#$\[\]/]/g, '_'); }
 
-// ─── INSTRUCTIONS ────────────────────────────────────────────────────────────
-// 1. Go to https://console.firebase.google.com → Create a free project
-// 2. Add a Web App → copy your firebaseConfig values above (replace the demo ones)
-// 3. Go to Realtime Database → Create database → Start in TEST mode
-// 4. That's it — players on any device will now sync in real time!
-// ─────────────────────────────────────────────────────────────────────────────
-
-let app, db, gameRef, playersRef;
+let _db, _gameRef, _playersRef;
 let _fbReady = false;
+let _fbError = null;
 
 try {
-  app = initializeApp(firebaseConfig);
-  db  = getDatabase(app);
-  gameRef    = ref(db, 'quizstage/game');
-  playersRef = ref(db, 'quizstage/players');
+  const app = initializeApp(firebaseConfig);
+  _db = getDatabase(app);
+  _gameRef    = ref(_db, 'quizstage/game');
+  _playersRef = ref(_db, 'quizstage/players');
   _fbReady = true;
+  console.log('[QuizStage] Firebase initialised OK');
 } catch(e) {
-  console.warn('Firebase init failed — running in local-only demo mode.', e);
+  _fbError = e.message;
+  console.error('[QuizStage] Firebase init error:', e);
 }
 
-// ─── EXPOSE FB HELPERS TO GLOBAL SCOPE ───────────────────────────────────────
-// Key sanitiser — Firebase keys cannot contain . # $ / [ ]
-function sanitiseKey(name){ return name.replace(/[.#$\/\[\]]/g,'_'); }
-
 window._fb = {
-  ready: () => _fbReady,
+  ready:  () => _fbReady,
+  error:  () => _fbError,
 
-  // Read the current game once (returns a Promise<gameObj|null>)
   getGame: () => {
     if (!_fbReady) return Promise.resolve(null);
-    return get(gameRef).then(snap => snap.val());
+    console.log('[QuizStage] getGame() called');
+    return get(_gameRef)
+      .then(snap => { const v = snap.val(); console.log('[QuizStage] getGame() result:', v); return v; })
+      .catch(e  => { console.error('[QuizStage] getGame() failed:', e.code, e.message); throw e; });
   },
 
-  // Admin writes the full game state
-  pushGame: (gameObj) => {
+  pushGame: (obj) => {
     if (!_fbReady) return Promise.resolve();
-    if (gameObj === null) return remove(gameRef);
-    return set(gameRef, gameObj);
+    if (obj === null) return remove(_gameRef);
+    return set(_gameRef, obj)
+      .then(() => console.log('[QuizStage] pushGame OK'))
+      .catch(e  => { console.error('[QuizStage] pushGame FAILED:', e.code, e.message); throw e; });
   },
 
-  // Admin writes a full player list
   pushPlayers: (arr) => {
     if (!_fbReady) return Promise.resolve();
     const obj = {};
     arr.forEach(p => { obj[sanitiseKey(p.name)] = p; });
-    return set(playersRef, obj);
+    return set(_playersRef, obj)
+      .catch(e => console.error('[QuizStage] pushPlayers FAILED:', e.code, e.message));
   },
 
-  // Player joins: writes their full record (creates if missing, overwrites if exists)
   updatePlayer: (name, data) => {
     if (!_fbReady) return Promise.resolve();
     const key = sanitiseKey(name);
-    // Use set() not update() so a brand-new player node is always created cleanly
-    return set(ref(db, 'quizstage/players/' + key), { ...data, name });
+    console.log('[QuizStage] updatePlayer:', name, '→ key:', key);
+    return set(ref(_db, 'quizstage/players/' + key), { ...data, name })
+      .then(() => console.log('[QuizStage] updatePlayer OK:', name))
+      .catch(e  => { console.error('[QuizStage] updatePlayer FAILED:', e.code, e.message); throw e; });
   },
 
-  // Listen: called on every game state change (all clients)
-  onGame: (cb) => {
-    if (!_fbReady) return () => {};
-    return onValue(gameRef, snap => cb(snap.val()));
-  },
-
-  // Listen: called on every players change (all clients)
-  onPlayers: (cb) => {
-    if (!_fbReady) return () => {};
-    return onValue(playersRef, snap => {
-      const val = snap.val();
-      cb(val ? Object.values(val) : []);
-    });
-  },
+  onGame:    (cb) => { if (!_fbReady) return ()=>{}; return onValue(_gameRef,    snap => cb(snap.val())); },
+  onPlayers: (cb) => { if (!_fbReady) return ()=>{}; return onValue(_playersRef, snap => { const v=snap.val(); cb(v ? Object.values(v) : []); }); },
 };
 
-// Signal that Firebase is ready.
-// Use setTimeout(0) so the main <script> block has time to register its
-// 'fb-ready' listener before this fires (ES modules execute async).
-window._fb._ready = _fbReady;
+// Fire fb-ready after a tick so the main <script> listener is registered first
 setTimeout(() => window.dispatchEvent(new Event('fb-ready')), 0);
 </script>
 <style>
@@ -405,6 +388,11 @@ video{background:#000;}
 
       <div class="emsg" id="ejwrong" style="text-align:center;margin-bottom:14px;font-size:13px;padding:10px;background:rgba(231,76,60,.07);border-radius:9px;border:1px solid rgba(231,76,60,.2)">❌ Code not recognised. Double-check the screen.</div>
 
+      <!-- Firebase connection status — updates automatically -->
+      <div id="fb-status-badge" style="display:flex;align-items:center;justify-content:center;gap:7px;padding:8px 14px;border-radius:10px;margin-bottom:14px;font-size:12px;font-family:'Space Mono',monospace;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
+        <span id="fb-status-dot" style="width:8px;height:8px;border-radius:50%;background:var(--warn);display:inline-block;flex-shrink:0"></span>
+        <span id="fb-status-text" style="color:var(--muted)">Connecting to server…</span>
+      </div>
       <button class="btn btn-primary btn-block" style="padding:14px;font-size:16px;border-radius:12px;margin-bottom:10px" id="join-submit-btn" onclick="doJoin()">🚀 Enter Lobby</button>
       <p style="text-align:center;font-size:12px;color:var(--muted);line-height:1.7">No app download needed · Works on any device</p>
     </div>
@@ -655,9 +643,21 @@ let S={
 
 // ═══ FIREBASE SYNC ═══
 // Called once Firebase module signals it's ready
+function updateFbBadge(connected, msg){
+  const dot  = document.getElementById('fb-status-dot');
+  const text = document.getElementById('fb-status-text');
+  if(dot)  dot.style.background  = connected ? 'var(--safe)' : 'var(--danger)';
+  if(text) text.textContent = msg;
+  if(text) text.style.color = connected ? 'var(--safe)' : 'var(--danger)';
+}
+
 function initFirebaseSync() {
   const fb = window._fb;
-  if (!fb || !fb.ready()) return; // demo mode — local only
+  if (!fb || !fb.ready()){
+    updateFbBadge(false, 'Firebase not connected — demo mode');
+    return;
+  }
+  updateFbBadge(true, 'Connected to Firebase ✓');
 
   // ── Listen: game state → sync into S and re-render ──
   fb.onGame(gameData => {
@@ -733,17 +733,25 @@ function initFirebaseSync() {
   });
 }
 
-// Subscribe to fb-ready event (fired after setTimeout(0) in the module)
-window.addEventListener('fb-ready', () => {
-  if (!window._fbSyncInit) { window._fbSyncInit = true; initFirebaseSync(); }
+// Listen for fb-ready then init sync exactly once
+window.addEventListener('fb-ready', function onFbReady(){
+  window.removeEventListener('fb-ready', onFbReady);
+  if (!window._fbSyncInit){
+    window._fbSyncInit = true;
+    initFirebaseSync();
+    console.log('[QuizStage] initFirebaseSync() called via fb-ready event');
+  }
 });
-// Belt-and-suspenders: poll every 50ms until Firebase is ready (handles edge
-// cases where the event fires before this script even parses on slow devices)
+// Fallback poll — catches the case where the event fired before this line ran
 (function pollFb(){
-  if(window._fb && window._fb.ready()){
-    if(!window._fbSyncInit){ window._fbSyncInit=true; initFirebaseSync(); }
+  if (window._fb){
+    if (!window._fbSyncInit){
+      window._fbSyncInit = true;
+      initFirebaseSync();
+      console.log('[QuizStage] initFirebaseSync() called via poll');
+    }
   } else {
-    setTimeout(pollFb, 50);
+    setTimeout(pollFb, 30);
   }
 })();
 function uid(){return 'q'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
@@ -1809,60 +1817,66 @@ function renderJoin(){
 }
 function doCheckCode(){ doJoin(); }
 function doJoin(){
-  const code=(document.getElementById('jcode')||{value:''}).value.trim().toUpperCase();
-  const pname=(document.getElementById('jname')||{value:''}).value.trim();
+  const code  = (document.getElementById('jcode')||{value:''}).value.trim().toUpperCase();
+  const pname = (document.getElementById('jname')||{value:''}).value.trim();
   ['ejcode','ejname','ejwrong'].forEach(hideE);
   let ok=true;
-  if(!code){showE('ejcode');ok=false;}
-  if(!pname){showE('ejname');ok=false;}
+  if(!code) { showE('ejcode'); ok=false; }
+  if(!pname){ showE('ejname'); ok=false; }
   if(!ok) return;
 
-  const btn=document.getElementById('join-submit-btn');
-  const fb=window._fb;
+  const btn = document.getElementById('join-submit-btn');
+  const errEl = document.getElementById('ejwrong');
 
-  // ── Firebase path ──
+  function showErr(msg){ if(errEl) errEl.textContent=msg; showE('ejwrong'); if(btn){btn.disabled=false;btn.textContent='🚀 Enter Lobby';} }
+
+  function validateAndJoin(gameData){
+    console.log('[QuizStage] validateAndJoin gameData:', gameData);
+    if(!gameData){
+      showErr('❌ No active game found. Make sure the host has released a quiz.');
+      return;
+    }
+    if(code !== gameData.gc){
+      showErr('❌ Wrong code. The active game code is: ' + gameData.gc);
+      return;
+    }
+    _completeJoin(code, pname, gameData);
+  }
+
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Joining…'; }
+
+  const fb = window._fb;
+
+  // If Firebase is available — always do a fresh read from the DB
   if(fb && fb.ready()){
-    if(btn){ btn.disabled=true; btn.textContent='⏳ Joining…'; }
-
     fb.getGame()
-      .then(gameData=>{
-        console.log('[QuizStage] getGame result:', gameData);
-        if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
-        // No game in Firebase at all
-        if(!gameData){
-          const el=document.getElementById('ejwrong');
-          if(el) el.textContent='❌ No active game. Ask the host to release a quiz first.';
-          showE('ejwrong'); return;
-        }
-        // Code mismatch
-        if(code !== gameData.gc){
-          const el=document.getElementById('ejwrong');
-          if(el) el.textContent='❌ Wrong code — double-check the big screen. Got: '+gameData.gc;
-          showE('ejwrong'); return;
-        }
-        _completeJoin(code, pname, gameData);
-      })
-      .catch(err=>{
-        console.error('[QuizStage] Join error:', err);
-        if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
-        const el=document.getElementById('ejwrong');
-        if(el) el.textContent='❌ Could not reach Firebase. Check your connection. ('+err.message+')';
-        showE('ejwrong');
+      .then(validateAndJoin)
+      .catch(err => {
+        console.error('[QuizStage] getGame failed:', err);
+        // Firebase failed — fall back to local state if we have it
+        if(S.gon){ validateAndJoin({gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns}); }
+        else { showErr('❌ Could not reach the server (' + err.message + '). Check your internet connection.'); }
       });
-
-  } else {
-    // ── Local/demo mode ──
-    if(S.gon && code!==S.gc){
-      const el=document.getElementById('ejwrong');
-      if(el) el.textContent='❌ Wrong code.';
-      showE('ejwrong'); return;
-    }
-    if(!S.gon){
-      const el=document.getElementById('ejwrong');
-      if(el) el.textContent='❌ No active game. Ask the host to release a quiz.';
-      showE('ejwrong'); return;
-    }
-    _completeJoin(code, pname, null);
+  }
+  // Firebase not ready yet — use local S if populated (admin on same device)
+  else if(S.gon){
+    console.log('[QuizStage] Firebase not ready, using local state');
+    validateAndJoin({gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns});
+  }
+  // Nothing available yet — wait up to 5s for Firebase to come up then retry
+  else {
+    console.log('[QuizStage] Waiting for Firebase to be ready...');
+    let waited = 0;
+    const waitForFb = setInterval(() => {
+      waited += 200;
+      if(window._fb && window._fb.ready()){
+        clearInterval(waitForFb);
+        window._fb.getGame().then(validateAndJoin).catch(err => showErr('❌ Connection error: ' + err.message));
+      } else if(waited >= 5000){
+        clearInterval(waitForFb);
+        showErr('❌ Could not connect to Firebase after 5 seconds. Check your internet and try again.');
+      }
+    }, 200);
   }
 }
 
