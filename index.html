@@ -83,41 +83,76 @@ window._fb = {
   onGame:    (cb) => { if (!_fbReady) return ()=>{}; return onValue(_gameRef,    snap => cb(snap.val())); },
   onPlayers: (cb) => { if (!_fbReady) return ()=>{}; return onValue(_playersRef, snap => { const v=snap.val(); cb(v ? Object.values(v) : []); }); },
 
-  // ── WebRTC signalling via Firebase (no extra server needed) ──
-  // Each player gets a path: quizstage/webrtc/{sanitisedPlayerName}/
-  //   offer, answer, offerCandidates/, answerCandidates/
-  _webrtcRef: (player) => ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)),
+  // ── WebRTC signalling via Firebase ──
+  // Path per player: quizstage/webrtc/{sanitisedName}/
+  //   present: true/null  — camera-is-live flag
+  //   offer:   {type,sdp} — SDP offer from camera tab
+  //   answer:  {type,sdp} — SDP answer from receiver
+  //   offerCandidates/{id}: ICE from camera tab
+  //   answerCandidates/{id}: ICE from receiver
 
-  webrtcSendOffer: (player, offer) => {
-    if (!_fbReady) return Promise.resolve();
-    return set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer'), offer);
-  },
-  webrtcSendAnswer: (player, answer) => {
-    if (!_fbReady) return Promise.resolve();
-    return set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer'), answer);
-  },
-  webrtcAddCandidate: (player, side, candidate) => {
-    if (!_fbReady) return Promise.resolve();
-    return push(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side), candidate);
-  },
+  _wref: (player) => ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)),
+
+  webrtcSendOffer: (player, offer) =>
+    _fbReady ? set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer'), offer) : Promise.resolve(),
+
+  webrtcSendAnswer: (player, answer) =>
+    _fbReady ? set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer'), answer) : Promise.resolve(),
+
+  webrtcAddCandidate: (player, side, cand) =>
+    _fbReady ? push(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side), cand) : Promise.resolve(),
+
+  // One-shot listener: resolves when offer appears (handles already-present offers)
   webrtcOnOffer: (player, cb) => {
     if (!_fbReady) return () => {};
-    return onValue(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer'),
-      snap => { if (snap.val()) cb(snap.val()); });
+    const r = child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer');
+    return onValue(r, snap => { const v = snap.val(); if (v && v.sdp) cb(v); });
   },
+
   webrtcOnAnswer: (player, cb) => {
     if (!_fbReady) return () => {};
-    return onValue(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer'),
-      snap => { if (snap.val()) cb(snap.val()); });
+    const r = child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer');
+    return onValue(r, snap => { const v = snap.val(); if (v && v.sdp) cb(v); });
   },
+
   webrtcOnCandidates: (player, side, cb) => {
     if (!_fbReady) return () => {};
     return onChildAdded(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side),
-      snap => { if (snap.val()) cb(snap.val()); });
+      snap => { const v = snap.val(); if (v) cb(v); });
   },
-  webrtcClear: (player) => {
+
+  webrtcClear: (player) =>
+    _fbReady ? remove(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player))) : Promise.resolve(),
+
+  // Clear only the signalling data (offer/answer/candidates), preserve presence flag
+  webrtcClearSignalling: (player) => {
     if (!_fbReady) return Promise.resolve();
-    return remove(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)));
+    const base = 'quizstage/webrtc/' + sanitiseKey(player);
+    return Promise.all([
+      remove(ref(_db, base + '/offer')),
+      remove(ref(_db, base + '/answer')),
+      remove(ref(_db, base + '/offerCandidates')),
+      remove(ref(_db, base + '/answerCandidates')),
+    ]);
+  },
+
+  // Presence flag — written by camera tab when streaming starts
+  webrtcSetPresence: (player, live) => {
+    if (!_fbReady) return Promise.resolve();
+    const r = ref(_db, 'quizstage/webrtc/' + sanitiseKey(player) + '/present');
+    return live ? set(r, true) : remove(r);
+  },
+
+  // Watch for any new camera going live: fires cb(sanitisedKey) when present=true appears
+  // Uses onChildAdded so it fires once per player, not on every ICE candidate
+  webrtcOnAnyPresence: (cb) => {
+    if (!_fbReady) return () => {};
+    // onChildAdded fires for each existing child AND each new one
+    return onChildAdded(ref(_db, 'quizstage/webrtc'), snap => {
+      const data = snap.val();
+      // Only trigger when the 'present' field is explicitly true
+      if (data && data.present === true) cb(snap.key);
+    });
   },
 };
 
@@ -293,8 +328,11 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
   border-radius:18px;width:260px;
   backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 1px rgba(91,76,255,.08);
-  overflow:hidden;transition:width .22s ease,border-radius .22s ease;
+  overflow:hidden;
+  /* Only transition width/border-radius, NOT position — instant drag */
+  transition:width .22s ease,border-radius .22s ease;
   touch-action:none;
+  will-change:transform; /* GPU layer for smooth drag */
 }
 #admin-float-bar.visible{display:flex;}
 #admin-float-bar.afb-minimized{width:52px;border-radius:14px;}
@@ -708,13 +746,14 @@ let S={
   quizzes:[], eqid:null, eqs:[], eqi:-1, qf:'all',
   curQ:0, paused:false, revealAns:false, curStep:70,
   pickedAns:null,         // 0-3 answer index admin clicked, null = none yet
+  gameOver:false,         // true = wrong answer — show game-over screen
   lifelines:{             // per-game lifeline state (reset on new game/question-skip)
-    fifty:false,          // true = used (greyed out)
+    fifty:false,
     ask:false,
     skip:false,
-    hiddenAnswers:[]      // indices of answers hidden by 50:50
+    hiddenAnswers:[]
   },
-  mpBonus:false           // multiplayer bonus round: other players can earn +3
+  mpBonus:false
 };
 
 // ═══ FIREBASE SYNC ═══
@@ -734,6 +773,8 @@ function initFirebaseSync() {
     return;
   }
   updateFbBadge(true, 'Connected to Firebase ✓');
+  // Start watching Firebase for cross-device camera presence (WebRTC)
+  rtcWatchForCameras();
 
   // ── Listen: game state → sync into S and re-render ──
   fb.onGame(gameData => {
@@ -762,7 +803,8 @@ function initFirebaseSync() {
     S.curStep  = gameData.curStep || 70;
     S.pickedAns= (gameData.pickedAns !== undefined) ? gameData.pickedAns : null;
     if(gameData.lifelines) S.lifelines = gameData.lifelines;
-    S.mpBonus = gameData.mpBonus || false;
+    S.mpBonus   = gameData.mpBonus   || false;
+    S.gameOver  = gameData.gameOver  || false;
     // Re-attach the quiz object from local quizzes list
     // Load quiz: prefer embedded object (works on player devices with no local quizzes)
     if (gameData.quiz) {
@@ -979,7 +1021,7 @@ function releaseGame(){
   if(!q)return;
   S.gon=true; S.gc=mkc(); S.aq=q; S.players=[];
   S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70; S.pickedAns=null;
-  S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false;
+  S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
   // Write full quiz into Firebase so player devices (which have no quiz data) can load it
   const gameData={
     gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:70, status:'active',
@@ -1000,7 +1042,7 @@ function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
   S.curQ=0; S.paused=false; S.revealAns=false; S.pickedAns=null;
-  S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false;
+  S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
   sessionStorage.removeItem('qs_player');
   document.getElementById('tlobby').disabled=true;
   document.getElementById('tgame').disabled=true;
@@ -1027,61 +1069,61 @@ function toggleFloatMin(){
   if(tog){ tog.textContent=isMin?'⌄':'⌃'; tog.title=isMin?'Expand':'Minimize'; }
 }
 
-// ── Draggable float bar — pointer events on the handle ──
+// ── Draggable float bar ──
+// Works anywhere on screen; clamps to viewport bounds; touch + mouse.
 (function(){
-  const bar = document.getElementById('admin-float-bar');
+  const bar    = document.getElementById('admin-float-bar');
   const handle = document.getElementById('afb-min-handle');
-  if(!bar||!handle) return;
+  if(!bar || !handle) return;
 
-  let startX=0, startY=0, startL=0, startT=0;
-  let dragged=false;
+  let startX=0, startY=0, startL=0, startT=0, dragged=false;
 
-  function getPos(){
-    // Ensure bar has explicit top/left (convert from bottom/right if needed)
+  // Convert CSS bottom/right → explicit top/left so we can drag freely
+  function anchorToTopLeft(){
     const rect = bar.getBoundingClientRect();
-    return { left: rect.left, top: rect.top };
+    bar.style.bottom = 'auto';
+    bar.style.right  = 'auto';
+    bar.style.left   = rect.left + 'px';
+    bar.style.top    = rect.top  + 'px';
   }
 
   handle.addEventListener('pointerdown', e => {
-    if(e.button!==0&&e.pointerType==='mouse') return;
+    if(e.button !== 0 && e.pointerType === 'mouse') return;
     e.preventDefault();
+    e.stopPropagation();
     dragged = false;
     bar._dragging = false;
-
-    const pos = getPos();
-    // Switch to top/left positioning
-    bar.style.bottom = 'auto';
-    bar.style.right  = 'auto';
-    bar.style.left   = pos.left + 'px';
-    bar.style.top    = pos.top  + 'px';
-
+    anchorToTopLeft();
     startX = e.clientX;
     startY = e.clientY;
-    startL = pos.left;
-    startT = pos.top;
-
+    startL = parseFloat(bar.style.left);
+    startT = parseFloat(bar.style.top);
     handle.setPointerCapture(e.pointerId);
     handle.style.cursor = 'grabbing';
+    bar.style.transition = 'none'; // disable transition during drag
   });
 
   handle.addEventListener('pointermove', e => {
     if(!handle.hasPointerCapture(e.pointerId)) return;
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
-    if(Math.abs(dx)+Math.abs(dy) > 4){ dragged=true; bar._dragging=true; }
+    if(!dragged && Math.abs(dx)+Math.abs(dy) > 3){
+      dragged = true;
+      bar._dragging = true;
+    }
     if(!dragged) return;
-
-    // Clamp to viewport
-    const maxL = window.innerWidth  - bar.offsetWidth;
-    const maxT = window.innerHeight - bar.offsetHeight;
-    bar.style.left = Math.max(0, Math.min(maxL, startL+dx)) + 'px';
-    bar.style.top  = Math.max(0, Math.min(maxT, startT+dy)) + 'px';
+    const maxL = Math.max(0, window.innerWidth  - bar.offsetWidth);
+    const maxT = Math.max(0, window.innerHeight - bar.offsetHeight);
+    bar.style.left = Math.max(0, Math.min(maxL, startL + dx)) + 'px';
+    bar.style.top  = Math.max(0, Math.min(maxT, startT + dy)) + 'px';
   });
 
-  handle.addEventListener('pointerup', e => {
+  handle.addEventListener('pointerup', () => {
+    handle.releasePointerCapture && handle.releasePointerCapture(0);
     handle.style.cursor = 'grab';
-    // Allow toggle click only if we didn't drag
-    setTimeout(()=>{ bar._dragging=false; }, 50);
+    bar.style.transition = ''; // restore transition for minimize animation
+    // Delay clearing drag flag so click handler (toggleFloatMin) can check it
+    setTimeout(() => { bar._dragging = false; }, 80);
   });
 })();
 
@@ -1179,116 +1221,128 @@ if(!window._rtcListeners) window._rtcListeners = {};
 
 // ── CALLER side (camera tab): start streaming to all peers ──
 async function rtcStartCall(stream, pname) {
-  // Clean up any previous call for this player
-  rtcStopCall(pname);
-
   if (!window._fb || !window._fb.ready()) {
     console.warn('[WebRTC] Firebase not ready — cross-device streaming unavailable');
     return;
   }
 
+  // Close any previous caller connection for this player (don't re-use stale pc)
+  const oldPc = window._rtcCallers[pname];
+  if (oldPc) { try { oldPc.close(); } catch(e){} delete window._rtcCallers[pname]; }
+  // Unsub old listeners
+  const oldLs = window._rtcListeners[pname];
+  if (oldLs) {
+    ['unsubAnswer','unsubAnswerCand'].forEach(k => { try { if(oldLs[k]) oldLs[k](); } catch(e){} });
+  }
+
   console.log('[WebRTC] Starting call for', pname);
 
-  // Clear any stale signalling data from previous session
-  await window._fb.webrtcClear(pname).catch(() => {});
+  // Wipe stale signalling data but keep structure
+  // Use a sub-path so we don't accidentally delete presence on restart
+  await window._fb.webrtcClearSignalling(pname).catch(() => {});
 
   const pc = new RTCPeerConnection(_STUN);
   window._rtcCallers[pname] = pc;
 
-  // Add all camera tracks to this connection
   stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
-  // ICE candidate discovery — send each one to Firebase as found
   pc.onicecandidate = e => {
     if (e.candidate && window._fb && window._fb.ready()) {
-      window._fb.webrtcAddCandidate(pname, 'offerCandidates', e.candidate.toJSON())
-        .catch(() => {});
+      window._fb.webrtcAddCandidate(pname, 'offerCandidates', e.candidate.toJSON()).catch(() => {});
     }
   };
 
   pc.onconnectionstatechange = () => {
-    console.log('[WebRTC] Caller state:', pc.connectionState, '(', pname, ')');
+    console.log('[WebRTC] Caller:', pc.connectionState, pname);
     if (pc.connectionState === 'connected') {
-      toast('📹 '+x(pname)+' live on projector via WebRTC ✓', 'ok');
+      toast('📹 '+x(pname)+' streaming via WebRTC ✓', 'ok');
+      renderCameras();
     }
     if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      toast('📹 WebRTC link dropped — reconnecting…', 'nf');
-      // Auto-retry after 3 seconds
+      console.warn('[WebRTC] Connection lost, retrying in 3s…');
       setTimeout(() => {
-        if (_camCurrentStream && _camActivePlayer === pname) {
-          rtcStartCall(_camCurrentStream, pname);
-        }
+        if (_camCurrentStream && _camActivePlayer === pname) rtcStartCall(_camCurrentStream, pname);
       }, 3000);
     }
   };
 
-  // Build and send the SDP offer
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   await window._fb.webrtcSendOffer(pname, { type: offer.type, sdp: offer.sdp });
-  console.log('[WebRTC] Offer sent for', pname);
 
-  // Listen for the answerer's SDP answer
+  // Write presence LAST — receivers watch this to know when to start handshake
+  // Remove then re-add to ensure onChildAdded fires even on reconnect
+  await window._fb.webrtcSetPresence(pname, false).catch(() => {});
+  await new Promise(r => setTimeout(r, 100)); // brief pause so remove propagates
+  await window._fb.webrtcSetPresence(pname, true).catch(() => {});
+  console.log('[WebRTC] Offer + presence written for', pname);
+
   const unsubAnswer = window._fb.webrtcOnAnswer(pname, async answer => {
     if (pc.signalingState === 'have-local-offer') {
       await pc.setRemoteDescription(new RTCSessionDescription(answer)).catch(console.warn);
-      console.log('[WebRTC] Answer received and set for', pname);
+      console.log('[WebRTC] Answer set for', pname);
     }
   });
 
-  // Listen for answerer's ICE candidates
   const unsubAnswerCand = window._fb.webrtcOnCandidates(pname, 'answerCandidates', async cand => {
-    if (pc.remoteDescription) {
-      await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
-    }
+    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
   });
 
-  if (!window._rtcListeners[pname]) window._rtcListeners[pname] = {};
-  window._rtcListeners[pname].unsubAnswer = unsubAnswer;
-  window._rtcListeners[pname].unsubAnswerCand = unsubAnswerCand;
+  window._rtcListeners[pname] = { unsubAnswer, unsubAnswerCand };
 }
 
 // ── Stop a caller-side peer connection ──
 function rtcStopCall(pname) {
   const pc = window._rtcCallers[pname];
-  if (pc) { pc.close(); delete window._rtcCallers[pname]; }
+  if (pc) { try { pc.close(); } catch(e){} delete window._rtcCallers[pname]; }
   const ls = window._rtcListeners[pname];
   if (ls) {
-    if (ls.unsubAnswer) ls.unsubAnswer();
-    if (ls.unsubAnswerCand) ls.unsubAnswerCand();
+    try { if(ls.unsubAnswer) ls.unsubAnswer(); } catch(e){}
+    try { if(ls.unsubAnswerCand) ls.unsubAnswerCand(); } catch(e){}
     delete window._rtcListeners[pname];
   }
-  if (window._fb && window._fb.ready()) window._fb.webrtcClear(pname).catch(() => {});
+  if (window._fb && window._fb.ready()) {
+    // Clear presence so receivers know camera is gone
+    window._fb.webrtcSetPresence(pname, false).catch(() => {});
+    // Clear all signalling data
+    window._fb.webrtcClear(pname).catch(() => {});
+  }
 }
 
 // ── ANSWERER side (projector/admin tab): receive stream from camera ──
 async function rtcStartReceive(pname) {
-  // Avoid creating a second connection if one already exists and is healthy
-  const existing = window._rtcAnswerers[pname];
-  if (existing && (existing.connectionState === 'connected' || existing.connectionState === 'connecting')) {
-    return;
-  }
-
   if (!window._fb || !window._fb.ready()) return;
 
-  console.log('[WebRTC] Starting receive for', pname);
+  // If we're the caller for this player, never also be receiver
+  if (window._rtcCallers && window._rtcCallers[pname]) return;
+
+  // If already connected/connecting, skip
+  const existing = window._rtcAnswerers[pname];
+  if (existing) {
+    const s = existing.connectionState;
+    if (s === 'connected' || s === 'connecting' || s === 'new') return;
+    // Otherwise it's failed/disconnected — clean it up and restart
+    try { existing.close(); } catch(e){}
+    delete window._rtcAnswerers[pname];
+  }
+
+  console.log('[WebRTC] Receiver starting for', pname);
 
   const pc = new RTCPeerConnection(_STUN);
   window._rtcAnswerers[pname] = pc;
+  let answerSent = false; // guard: only send answer once per offer
 
-  // When remote tracks arrive, store as real MediaStream and wire to video elements
   pc.ontrack = e => {
-    const stream = e.streams[0];
+    const stream = e.streams && e.streams[0];
     if (!stream) return;
-    console.log('[WebRTC] Track received for', pname);
-    S.streams[pname] = stream;           // real MediaStream — _mediaEl will now render <video>
-    // Wire to any already-rendered video elements immediately
+    console.log('[WebRTC] ✅ Track received for', pname);
+    S.streams[pname] = stream;
+    // Wire to every existing video element for this player
     document.querySelectorAll('video[data-player="'+CSS.escape(pname)+'"]').forEach(v => {
-      v.srcObject = stream;
-      v.play().catch(() => {});
+      v.srcObject = stream; v.play().catch(() => {});
     });
-    // Re-render projection so canvas→video upgrade happens
-    renderProj();
+    renderProj(); renderCameras();
+    if (S.ain) toast('📹 '+x(pname)+' live via WebRTC', 'ok');
   };
 
   pc.onicecandidate = e => {
@@ -1298,15 +1352,17 @@ async function rtcStartReceive(pname) {
   };
 
   pc.onconnectionstatechange = () => {
-    console.log('[WebRTC] Receiver state:', pc.connectionState, '(', pname, ')');
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      // Clean up — will be re-triggered next time renderProj calls rtcStartReceive
+    console.log('[WebRTC] Receiver:', pc.connectionState, pname);
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       delete window._rtcAnswerers[pname];
+      answerSent = false;
+      renderCameras();
     }
   };
 
-  // Listen for the caller's offer on Firebase
+  // Watch for offer — onValue handles both already-present and future offers
   const unsubOffer = window._fb.webrtcOnOffer(pname, async offer => {
+    if (answerSent) return; // don't re-answer same offer
     if (pc.signalingState !== 'stable') return;
     console.log('[WebRTC] Offer received for', pname);
     try {
@@ -1314,49 +1370,84 @@ async function rtcStartReceive(pname) {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       await window._fb.webrtcSendAnswer(pname, { type: answer.type, sdp: answer.sdp });
+      answerSent = true;
       console.log('[WebRTC] Answer sent for', pname);
-    } catch(err) { console.warn('[WebRTC] Offer handling error:', err); }
-  });
-
-  // Listen for caller's ICE candidates
-  const unsubOfferCand = window._fb.webrtcOnCandidates(pname, 'offerCandidates', async cand => {
-    if (pc.remoteDescription) {
-      await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
+    } catch(err) {
+      console.warn('[WebRTC] Offer handling error:', err);
     }
   });
 
+  // Watch for caller ICE candidates
+  const unsubOfferCand = window._fb.webrtcOnCandidates(pname, 'offerCandidates', async cand => {
+    try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch(e){}
+  });
+
   if (!window._rtcListeners[pname]) window._rtcListeners[pname] = {};
-  window._rtcListeners[pname].unsubOffer = unsubOffer;
+  window._rtcListeners[pname].unsubOffer     = unsubOffer;
   window._rtcListeners[pname].unsubOfferCand = unsubOfferCand;
 }
 
 // ── Stop a receiver-side peer connection ──
 function rtcStopReceive(pname) {
   const pc = window._rtcAnswerers[pname];
-  if (pc) { pc.close(); delete window._rtcAnswerers[pname]; }
+  if (pc) { try { pc.close(); } catch(e){} delete window._rtcAnswerers[pname]; }
   const ls = window._rtcListeners[pname];
   if (ls) {
-    if (ls.unsubOffer) ls.unsubOffer();
-    if (ls.unsubOfferCand) ls.unsubOfferCand();
+    ['unsubOffer','unsubOfferCand','unsubAnswer','unsubAnswerCand'].forEach(k => {
+      try { if(ls[k]) ls[k](); } catch(e){}
+    });
+    delete window._rtcListeners[pname];
   }
 }
 
-// ── Start receiving for all players who have a cam-ready sentinel ──
-// Called from renderProj so the connection is established as soon as
-// the projector screen renders with a player who has an active camera
+// ── Start receiving for all players who have a cam-ready sentinel OR Firebase offer ──
 function rtcEnsureReceiving() {
   if (!S.gon) return;
   S.players.forEach(p => {
-    // Only try to receive if: there's a sentinel (cam is live), we don't already
-    // have a real MediaStream (that would mean we're the camera tab itself),
-    // and we're not already connected as answerer
     const sentinel = S.streams[p.name];
     const hasRealStream = sentinel instanceof MediaStream;
+    // If we own this stream (caller), don't also receive it
+    const isCaller = window._rtcCallers && window._rtcCallers[p.name];
+    if (isCaller) return;
     if (sentinel && !hasRealStream) {
       rtcStartReceive(p.name);
     }
   });
 }
+
+// ── Watch Firebase for cameras going live (cross-device discovery) ──
+// Called once when Firebase is ready. Uses onChildAdded on the webrtc node —
+// fires for each existing child on load, plus new ones as they're added.
+// This means we catch cameras that went live before this tab even opened.
+function rtcWatchForCameras() {
+  if (!window._fb || !window._fb.ready()) return;
+  console.log('[WebRTC] Watching Firebase for camera presence…');
+
+  window._fb.webrtcOnAnyPresence(sanitisedKey => {
+    // Reverse-lookup: find the player whose sanitised name matches this key
+    const player = S.players.find(p =>
+      sanitisePlayerKey(p.name) === sanitisedKey || p.name === sanitisedKey
+    );
+    const pname = player ? player.name : sanitisedKey;
+
+    // Never receive our own stream
+    if (window._rtcCallers && window._rtcCallers[pname]) return;
+
+    console.log('[WebRTC] Camera presence detected:', sanitisedKey, '→', pname);
+
+    // Set sentinel so UI shows "camera live"
+    if (!S.streams) S.streams = {};
+    if (!(S.streams[pname] instanceof MediaStream)) S.streams[pname] = 'remote';
+
+    // Start receive handshake
+    rtcStartReceive(pname);
+    renderCameras();
+    renderProj();
+  });
+}
+
+// Helper: sanitise player name the same way Firebase module does
+function sanitisePlayerKey(s) { return String(s).replace(/[.#$[\]/]/g, '_'); }
 // ── Per-player canvas elements receiving cross-tab frames ──
 // Key: playerName → { canvas, ctx, active }
 if(!window._camCanvases) window._camCanvases = {};
@@ -1954,7 +2045,7 @@ function mpBonusAward(playerIdx){
 // Shared Firebase push helper
 function _pushGameState(){
   if(window._fb&&window._fb.ready())
-    window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:S.pickedAns, lifelines:S.lifelines, mpBonus:S.mpBonus });
+    window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:S.pickedAns, lifelines:S.lifelines, mpBonus:S.mpBonus, gameOver:S.gameOver });
 }
 
 // ═══ PROJECTOR ═══
@@ -1971,7 +2062,7 @@ function renderProj(){
     return;
   }
 
-  el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;';
+  el.style.cssText='position:relative;width:100%;height:calc(100vh - 58px);background:#000;overflow:hidden;';
   const mode=getMode();
   const qd=S.aq&&S.aq.questions&&S.aq.questions[S.curQ||0];
 
@@ -1987,139 +2078,174 @@ function renderProj(){
 }
 
 // ── SINGLE PLAYER projection ──
-// Layout: video bg | ladder right (fully visible, no scroll) | question+lifelines+answers bottom-left
 function _renderProjSingle(el, qd){
-  const tp=S.players[0]||{emoji:'🎭',name:'Waiting for player…',score:0};
-  const ll=S.lifelines||{fifty:false,ask:false,skip:false,hiddenAnswers:[]};
-  const hidden=ll.hiddenAnswers||[];
-  const picked=S.pickedAns;
-  const revealed=picked!==null;
+  const tp      = S.players[0]||{emoji:'🎭',name:'Waiting for player…',score:0};
+  const ll      = S.lifelines||{fifty:false,ask:false,skip:false,hiddenAnswers:[]};
+  const hidden  = ll.hiddenAnswers||[];
+  const picked  = S.pickedAns;
+  const revealed= picked!==null;
+  const isOver  = S.gameOver;
   let h='';
 
-  // ── Layer 1: full-screen video/canvas ──
+  // ── BG video ──
   h+=_mediaEl('proj-vid-main', tp.name);
-
-  // ── Layer 2: emoji placeholder ──
   h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.5">'+tp.emoji+'</div>';
+  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.9),transparent);pointer-events:none"></div>';
 
-  // ── Layer 3: bottom gradient vignette ──
-  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.92) 0%,transparent 100%);pointer-events:none"></div>';
+  // ── LIVE badge ──
+  h+='<div style="position:absolute;top:14px;left:14px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
 
-  // ── LIVE badge — top left ──
-  h+='<div style="position:absolute;top:18px;left:18px;z-index:20;background:var(--danger);color:#fff;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
-
-  // ── Contestant chip — below LIVE badge ──
-  h+='<div style="position:absolute;top:60px;left:18px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.38);border-radius:14px;padding:10px 16px;backdrop-filter:blur(12px)">';
-  h+='<div style="font-size:9px;color:rgba(255,255,255,.38);letter-spacing:1px;text-transform:uppercase;margin-bottom:2px">Contestant</div>';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:26px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
-  h+='<div style="display:flex;align-items:center;gap:7px;margin-top:5px">';
-  if(S.ain){
-    h+='<button onclick="adjScore(0,-10)" style="width:26px;height:26px;border-radius:6px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.22);color:#fff;font-size:15px;font-weight:900;cursor:pointer;line-height:1">−</button>';
-  }
-  h+='<span style="font-family:Space Mono,monospace;font-size:16px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
-  if(S.ain){
-    h+='<button onclick="adjScore(0,10)" style="width:26px;height:26px;border-radius:6px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.22);color:#fff;font-size:15px;font-weight:900;cursor:pointer;line-height:1">+</button>';
-  }
+  // ── Contestant chip — top left below LIVE ──
+  h+='<div style="position:absolute;top:50px;left:14px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.35);border-radius:12px;padding:8px 14px;backdrop-filter:blur(10px)">';
+  h+='<div style="font-size:8px;color:rgba(255,255,255,.35);letter-spacing:1px;text-transform:uppercase;margin-bottom:1px">Contestant</div>';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:22px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
+  h+='<div style="display:flex;align-items:center;gap:6px;margin-top:4px">';
+  if(S.ain&&!isOver){ h+='<button onclick="adjScore(0,-10)" style="width:22px;height:22px;border-radius:5px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.2);color:#fff;font-size:13px;font-weight:900;cursor:pointer;line-height:1">−</button>'; }
+  h+='<span style="font-family:Space Mono,monospace;font-size:14px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
+  if(S.ain&&!isOver){ h+='<button onclick="adjScore(0,10)" style="width:22px;height:22px;border-radius:5px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.2);color:#fff;font-size:13px;font-weight:900;cursor:pointer;line-height:1">+</button>'; }
   h+='</div></div>';
 
-  // ── RIGHT SIDE: Ladder — fully visible, NO overflow/scroll ──
-  // Panel height is dynamic: title(28) + 15 rows × 24px + padding(20) = ~388px
+  // ── GAME OVER OVERLAY ──
+  if(isOver){
+    const finalScore = tp.score||0;
+    const ckpts=[100,50,0];
+    const reached = ckpts.find(c=>finalScore>=c)||0;
+    // Show the wrong answer reveal still on the Q, then big overlay
+    h+='<div style="position:absolute;inset:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;">';
+    h+='<div style="text-align:center;max-width:480px;padding:30px 20px">';
+    h+='<div style="font-size:72px;margin-bottom:12px">😔</div>';
+    h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(34px,6vw,60px);color:var(--danger);letter-spacing:4px;line-height:1;margin-bottom:8px">GAME OVER</div>';
+    h+='<div style="font-size:14px;color:rgba(255,255,255,.5);margin-bottom:22px;line-height:1.6">'+x(tp.name)+' answered incorrectly.</div>';
+    // Checkpoint info
+    if(finalScore===0&&reached===0){
+      h+='<div style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
+      h+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">No checkpoint reached</div>';
+      h+='<div style="font-family:Bebas Neue,cursive;font-size:38px;color:var(--danger);letter-spacing:2px">0 pts</div>';
+      h+='</div>';
+    } else {
+      h+='<div style="background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
+      h+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">🛡 Protected by checkpoint</div>';
+      h+='<div style="font-family:Bebas Neue,cursive;font-size:38px;color:var(--safe);letter-spacing:2px">'+finalScore+' pts</div>';
+      h+='<div style="font-size:12px;color:rgba(255,255,255,.4);margin-top:3px">Fell back to '+finalScore+' pt floor</div>';
+      h+='</div>';
+    }
+    if(S.ain){
+      h+='<button onclick="endGame()" style="padding:13px 36px;border-radius:12px;background:var(--accent);border:none;color:#fff;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.5px">End Game</button>';
+    }
+    h+='</div></div>';
+    // Still render the question behind the overlay so they can see the answer
+    h+='<div style="position:absolute;bottom:16px;left:14px;right:182px;z-index:30;opacity:.55;pointer-events:none">';
+    h+='<div style="background:rgba(0,0,0,.95);border:2px solid rgba(231,76,60,.4);border-radius:16px;padding:14px 18px">';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">';
+    if(qd) qd.answers.forEach((a,i)=>{
+      const isCrct=i===qd.correct, isPk=i===picked, isWrg=isPk&&!isCrct;
+      const bg=isCrct?'rgba(46,204,113,.25)':isWrg?'rgba(231,76,60,.22)':'rgba(255,255,255,.04)';
+      const bdr=isCrct?'rgba(46,204,113,.8)':isWrg?'rgba(231,76,60,.8)':'rgba(255,255,255,.08)';
+      h+='<div style="background:'+bg+';border:2px solid '+bdr+';border-radius:9px;padding:7px 10px;display:flex;align-items:center;gap:7px">';
+      h+='<div style="width:22px;height:22px;border-radius:5px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:13px;color:var(--gold);flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:11px;color:'+(isCrct?'var(--safe)':isWrg?'var(--danger)':'rgba(255,255,255,.3)')+';font-weight:500;flex:1">'+x(a)+'</div>';
+      if(isCrct) h+='<span style="font-size:12px">✅</span>';
+      if(isWrg)  h+='<span style="font-size:12px">❌</span>';
+      h+='</div>';
+    });
+    h+='</div></div></div>';
+
+    el.innerHTML=h;
+    _attachMedia('proj-vid-main', tp.name);
+    return;
+  }
+
+  // ── RIGHT SIDE: Ladder — FULLY VISIBLE, no scroll ──
+  // Use position:absolute top→bottom with overflow:hidden. Each row scales to fit.
   const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
   const sf=[100,50], curStep=S.curStep||150;
-  h+='<div style="position:absolute;top:18px;right:18px;width:152px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 8px;backdrop-filter:blur(10px);overflow:visible">';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:12px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:5px">LADDER</div>';
+  // Fixed row count = 15. Panel spans from top:14 to bottom:14, minus header.
+  // Row height = calc((100vh - 58px - 28px - 38px) / 15) ≈ auto
+  h+='<div style="position:absolute;top:14px;right:14px;bottom:14px;width:148px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:7px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
+  h+='<div style="flex:1;display:flex;flex-direction:column;padding:4px 6px;gap:1px;overflow:hidden">';
   steps.forEach((v,i)=>{
     const cur=v===curStep, safe=sf.includes(v), past=v>curStep;
-    const rowBg  = cur ? 'background:rgba(245,200,66,.2);' : past ? 'background:rgba(255,255,255,.02);' : '';
-    const rowBdr = cur ? 'border:1px solid rgba(245,200,66,.5);' : 'border:1px solid transparent;';
-    const rowCol = cur ? 'color:var(--gold);font-weight:700;'
-                  : past ? 'color:rgba(255,255,255,.22);'
-                  : safe ? 'color:var(--safe);'
-                  : 'color:rgba(255,255,255,.44);';
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 6px;border-radius:5px;'+rowBg+rowBdr+rowCol+'font-family:Space Mono,monospace;font-size:9px;">';
+    const bg  = cur?'background:rgba(245,200,66,.2);':past?'background:rgba(255,255,255,.02);':'';
+    const bdr = cur?'border:1px solid rgba(245,200,66,.5);':'border:1px solid transparent;';
+    const col = cur?'color:var(--gold);font-weight:700;':past?'color:rgba(255,255,255,.22);':safe?'color:var(--safe);':'color:rgba(255,255,255,.44);';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:0 5px;border-radius:4px;flex:1;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:8.5px;min-height:0">';
     h+='<span>'+(cur?'▶ ':' ')+(safe?'🛡':'  ')+'Q'+(15-i)+'</span>';
     h+='<span>'+(past?'✓ ':'')+v+'</span></div>';
   });
-  h+='</div>';
+  h+='</div></div>';
 
-  // ── BOTTOM: Question card — left of ladder ──
-  h+='<div style="position:absolute;bottom:16px;left:16px;right:188px;z-index:20">';
-  h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.5);border-radius:18px;padding:16px 20px;backdrop-filter:blur(14px)">';
+  // ── BOTTOM: Question card (left of ladder) ──
+  h+='<div style="position:absolute;bottom:14px;left:14px;right:180px;z-index:20">';
+  h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:16px;padding:14px 18px;backdrop-filter:blur(14px)">';
 
-  // Title bar
-  h+='<div style="font-family:Space Mono,monospace;color:rgba(245,200,66,.7);font-size:9.5px;margin-bottom:10px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+  // Quiz title bar
+  h+='<div style="font-family:Space Mono,monospace;color:rgba(245,200,66,.65);font-size:9px;margin-bottom:8px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
 
   if(S.paused){
-    h+='<div style="font-size:clamp(18px,2vw,26px);font-weight:700;color:var(--warn);text-align:center;padding:16px 0;letter-spacing:3px">⏸ PAUSED</div>';
+    h+='<div style="font-size:clamp(18px,2vw,24px);font-weight:700;color:var(--warn);text-align:center;padding:14px 0;letter-spacing:3px">⏸ PAUSED</div>';
   } else {
 
-    // ── LIFELINES — always visible on projector, only clickable by admin ──
-    // Icons: 🪙 = 50:50 (coin/split)  📞 = Ask (phone a friend)  🔀 = Skip (shuffle/pass)
-    const llBtn = (icon, label, title, used, fn) => {
-      const usedStyle = 'opacity:.28;filter:grayscale(1);cursor:not-allowed;background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.08);';
-      const liveStyle = 'opacity:1;background:rgba(91,76,255,.2);border-color:rgba(91,76,255,.65);cursor:pointer;';
-      const disabled  = used || !S.ain;
-      const clickable = !used && S.ain;
-      return '<div title="'+title+'" style="display:flex;flex-direction:column;align-items:center;gap:3px;flex:1">'
-        +'<button '+(disabled?'disabled':('onclick="'+fn+'()"'))
-        +' style="width:46px;height:46px;border-radius:13px;border:2px solid;font-size:24px;'
-        +(used?usedStyle:liveStyle)
-        +'display:flex;align-items:center;justify-content:center;transition:all .2s;">'
-        +icon+'</button>'
-        +'<span style="font-size:8.5px;font-family:Space Mono,monospace;letter-spacing:.5px;'
-        +(used?'color:rgba(255,255,255,.2);text-decoration:line-through;':'color:rgba(255,255,255,.5);')+'">'+label+'</span>'
-        +'</div>';
+    // ── LIFELINES — ghost/transparent, floating above question ──
+    // Shown always so audience sees remaining lifelines.
+    // Only clickable by admin. Used ones become near-invisible.
+    const llBtn = (icon, title, used, fn) => {
+      // Active: semi-transparent background, full emoji opacity
+      // Used:   nearly invisible — just a ghost outline
+      const s = used
+        ? 'opacity:.18;filter:grayscale(1);cursor:default;background:transparent;border-color:rgba(255,255,255,.08);'
+        : S.ain
+          ? 'opacity:.85;background:rgba(0,0,0,.35);border-color:rgba(255,255,255,.22);cursor:pointer;'
+          : 'opacity:.75;background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.15);cursor:default;';
+      return '<button '+(used||!S.ain?'disabled':('onclick="'+fn+'()"'))
+        +' title="'+title+'"'
+        +' style="width:38px;height:38px;border-radius:10px;border:1px solid;font-size:20px;'
+        +s+'display:flex;align-items:center;justify-content:center;transition:all .25s;backdrop-filter:blur(4px);">'
+        +icon+'</button>';
     };
-    h+='<div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:13px;padding:10px 8px;background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.07);border-radius:12px">';
-    h+='<div style="font-size:9px;color:rgba(255,255,255,.3);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;writing-mode:vertical-rl;text-orientation:mixed;padding-right:4px;align-self:center">LIFE<br>LINES</div>';
-    h+=llBtn('🪙','50 : 50','50:50 — Removes two wrong answers, leaving one correct and one wrong', ll.fifty,'useFiftyFifty');
-    h+=llBtn('📞','Ask','Ask Anyone — Player can consult someone in the room', ll.ask,'useAskAnyone');
-    h+=llBtn('⏭️','Skip','Skip — Pass this question without penalty', ll.skip,'useSkip');
+    h+='<div style="display:flex;gap:5px;align-items:center;margin-bottom:10px">';
+    h+='<span style="font-size:8px;color:rgba(255,255,255,.28);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-right:3px">Lifelines</span>';
+    h+=llBtn('🪙','50:50 — Remove two wrong answers', ll.fifty,'useFiftyFifty');
+    h+=llBtn('📞','Ask Anyone — Consult someone',     ll.ask,  'useAskAnyone');
+    h+=llBtn('⏭️','Skip — Pass this question',        ll.skip, 'useSkip');
     h+='</div>';
 
     // Question text
-    h+='<div style="font-size:clamp(12px,1.4vw,18px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:12px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+    h+='<div style="font-size:clamp(11px,1.3vw,17px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:10px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
 
     // Answers grid — 2×2
-    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
     (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
       const isHidden  = hidden.includes(i) && !revealed;
       const isCorrect = qd && i===qd.correct;
       const isPicked  = picked!==null && i===picked;
       const isWrong   = isPicked && !isCorrect;
       let bg,bdr,col,cursor='';
-      if(isHidden){
-        bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.05)'; col='rgba(255,255,255,.12)';
-      } else if(!revealed){
-        bg='rgba(255,255,255,.07)'; bdr='rgba(255,255,255,.14)'; col='#fff';
-        if(S.ain) cursor='cursor:pointer;';
-      } else if(isCorrect){
-        bg='rgba(46,204,113,.22)'; bdr='rgba(46,204,113,.85)'; col='var(--safe)';
-      } else if(isWrong){
-        bg='rgba(231,76,60,.18)'; bdr='rgba(231,76,60,.8)'; col='var(--danger)';
-      } else {
-        bg='rgba(255,255,255,.03)'; bdr='rgba(255,255,255,.06)'; col='rgba(255,255,255,.25)';
-      }
+      if(isHidden){       bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.04)'; col='rgba(255,255,255,.1)'; }
+      else if(!revealed){ bg='rgba(255,255,255,.07)'; bdr='rgba(255,255,255,.13)'; col='#fff'; if(S.ain) cursor='cursor:pointer;'; }
+      else if(isCorrect){ bg='rgba(46,204,113,.22)';  bdr='rgba(46,204,113,.85)';  col='var(--safe)'; }
+      else if(isWrong){   bg='rgba(231,76,60,.18)';   bdr='rgba(231,76,60,.8)';    col='var(--danger)'; }
+      else{               bg='rgba(255,255,255,.03)'; bdr='rgba(255,255,255,.05)'; col='rgba(255,255,255,.22)'; }
       const lBg  = isHidden?'rgba(255,255,255,.04)':!revealed?'rgba(255,255,255,.1)':isCorrect?'rgba(46,204,113,.35)':isWrong?'rgba(231,76,60,.35)':'rgba(255,255,255,.05)';
-      const lCol = isHidden?'rgba(255,255,255,.1)':!revealed?'var(--gold)':isCorrect?'var(--safe)':isWrong?'var(--danger)':'rgba(255,255,255,.2)';
-      const shadow=(isCorrect&&revealed)?'box-shadow:0 0 16px rgba(46,204,113,.35);':(isWrong)?'box-shadow:0 0 14px rgba(231,76,60,.3);':'';
+      const lCol = isHidden?'rgba(255,255,255,.1)':!revealed?'var(--gold)':isCorrect?'var(--safe)':isWrong?'var(--danger)':'rgba(255,255,255,.18)';
+      const shadow=(isCorrect&&revealed)?'box-shadow:0 0 14px rgba(46,204,113,.3);':(isWrong)?'box-shadow:0 0 12px rgba(231,76,60,.28);':'';
       const clickable=S.ain&&!revealed&&!isHidden;
-      h+='<div '+(clickable?'onclick="projPickAnswer('+i+')"':'')+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:11px;padding:9px 12px;display:flex;align-items:center;gap:8px;transition:all .3s;'+cursor+(clickable?'user-select:none;':'')+shadow+'">';
-      h+='<div style="width:26px;height:26px;border-radius:6px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:15px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
-      h+='<div style="font-size:12px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
-      if(isCorrect&&revealed) h+='<span style="font-size:14px">✅</span>';
-      if(isWrong)             h+='<span style="font-size:14px">❌</span>';
+      h+='<div '+(clickable?'onclick="projPickAnswer('+i+')"':'')+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:10px;padding:8px 11px;display:flex;align-items:center;gap:7px;transition:all .3s;'+cursor+(clickable?'user-select:none;':'')+shadow+'">';
+      h+='<div style="width:24px;height:24px;border-radius:5px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:11px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
+      if(isCorrect&&revealed) h+='<span style="font-size:13px">✅</span>';
+      if(isWrong)             h+='<span style="font-size:13px">❌</span>';
       h+='</div>';
     });
     h+='</div>';
 
-    // After answer — next Q / complete
-    if(revealed && S.ain){
+    // Post-answer controls (correct path only — wrong triggers game-over overlay above)
+    if(revealed && S.ain && !isOver){
       const isLastQ=(S.curQ||0)>=(S.aq.questions?S.aq.questions.length-1:0);
       if(!isLastQ){
-        h+='<div style="margin-top:10px;text-align:center"><button onclick="projNextQuestion()" style="padding:8px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:.5px">▶ Next Question</button></div>';
+        h+='<div style="margin-top:9px;text-align:center"><button onclick="projNextQuestion()" style="padding:7px 22px;border-radius:9px;background:var(--accent);border:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer">▶ Next Question</button></div>';
       } else {
-        h+='<div style="margin-top:10px;text-align:center;font-family:Space Mono,monospace;font-size:11px;color:var(--gold);letter-spacing:1px">🏁 Quiz Complete!</div>';
+        h+='<div style="margin-top:9px;text-align:center;font-family:Space Mono,monospace;font-size:11px;color:var(--gold);letter-spacing:1px">🏁 Quiz Complete!</div>';
       }
     }
   }
@@ -2497,9 +2623,18 @@ function renderSession(){
   updateFloatBar();
 }
 // ── Admin clicks an answer on the projection (single player mode) ──
+// ─── Checkpoint system ───
+// Safety checkpoints at 50 and 100 pts (like Millionaire £1k / £32k floors).
+// If a player answers wrong their score drops to the highest checkpoint they passed.
+function _applyCheckpoint(currentScore){
+  if(currentScore >= 100) return 100;
+  if(currentScore >= 50)  return 50;
+  return 0;
+}
+
 function projPickAnswer(idx){
   if(!S.ain || !S.gon) return;
-  if(S.pickedAns !== null) return; // already picked
+  if(S.pickedAns !== null) return;
   const qd = S.aq && S.aq.questions && S.aq.questions[S.curQ||0];
   if(!qd) return;
 
@@ -2507,28 +2642,43 @@ function projPickAnswer(idx){
   const isCorrect = idx === qd.correct;
 
   if(isCorrect){
-    // Award points equal to current ladder step
     const pts = S.curStep || 10;
     if(S.players[0]){
       S.players[0].score = (S.players[0].score||0) + pts;
       if(window._fb&&window._fb.ready())
-        window._fb.updatePlayer(S.players[0].name, { score: S.players[0].score });
+        window._fb.updatePlayer(S.players[0].name, { score: S.players[0].score, emoji: S.players[0].emoji });
       toast('✅ Correct! +'+pts+' pts','ok');
     }
-    // Auto-advance to next question after 2.5s
+    // Push state then auto-advance after 2.5s
+    if(window._fb&&window._fb.ready())
+      window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:idx, lifelines:S.lifelines, mpBonus:S.mpBonus, gameOver:false });
+    renderProj(); updateFloatBar(); renderSession();
     setTimeout(() => {
-      if(S.pickedAns === null) return; // guard against double-fire
+      if(S.pickedAns === null) return;
       projNextQuestion();
     }, 2500);
+
   } else {
-    toast('❌ Wrong answer — '+['A','B','C','D'][idx]+' selected','er');
+    // ─── Wrong answer: apply checkpoint, trigger game-over ───
+    const p = S.players[0];
+    if(p){
+      const rawScore   = p.score || 0;
+      const safeScore  = _applyCheckpoint(rawScore);
+      p.score = safeScore;
+      if(window._fb&&window._fb.ready())
+        window._fb.updatePlayer(p.name, { score: safeScore, emoji: p.emoji });
+      // Toast with checkpoint info
+      if(safeScore > 0){
+        toast('❌ Wrong! Score protected at '+safeScore+' pts (checkpoint)','er');
+      } else {
+        toast('❌ Wrong! No checkpoint reached — score is 0','er');
+      }
+    }
+    S.gameOver = true;
+    if(window._fb&&window._fb.ready())
+      window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:idx, lifelines:S.lifelines, mpBonus:S.mpBonus, gameOver:true });
+    renderProj(); updateFloatBar(); renderSession();
   }
-
-  // Push answer state to Firebase so projector tabs see it
-  if(window._fb&&window._fb.ready())
-    window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:idx });
-
-  renderProj(); updateFloatBar(); renderSession();
 }
 
 // ── Move to next question (called after correct answer or manual skip) ──
@@ -2828,7 +2978,7 @@ function renderProj(){
   const qd=S.aq.questions&&S.aq.questions[S.curQ||0];
   const isMulti=mp>1;
 
-  el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;';
+  el.style.cssText='position:relative;width:100%;height:calc(100vh - 58px);background:#000;overflow:hidden;';
   let h='';
 
   if(!isMulti){
