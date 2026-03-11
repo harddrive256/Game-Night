@@ -846,14 +846,14 @@ function doLogin(){
   if(!p){showE('ep');addE('fp');return;}
   if(u!==AU||p!==AP){showE('ec');addE('fu');addE('fp');return;}
   S.ain=true;
-  sessionStorage.setItem('qs_admin','1');
+  localStorage.setItem('qs_admin','1');
   const chip=document.getElementById('achip');chip.style.display='flex';
   go('admin');
   aTab('overview',document.querySelector('.anav'));
 }
 function doLogout(){
   S.ain=false;
-  sessionStorage.removeItem('qs_admin');
+  localStorage.removeItem('qs_admin');
   document.getElementById('achip').style.display='none';
   go('home');
 }
@@ -869,6 +869,8 @@ function aTab(tab,el){
   const pg=document.getElementById('ap-'+tab);
   if(pg) pg.classList.add('on');
   if(el) el.classList.add('on');
+  // When switching to cameras tab, poll camera devices immediately
+  if(tab==='cameras' && _bc) _bc.postMessage({ type: 'admin-poll' });
   const renders={overview:renderOverview,quizzes:renderQL,session:renderSession,cameras:renderCameras,scores:renderScores,arch:renderArch};
   if(renders[tab]) renders[tab]();
 }
@@ -1041,18 +1043,111 @@ const _bc = (() => {
 if(_bc){
   _bc.onmessage = ev => {
     if(!ev.data) return;
-    if(ev.data.type==='cam-ready'){ renderCameras(); renderProj(); }
-    if(ev.data.type==='cam-stopped'){ delete S.streams[ev.data.player]; renderCameras(); renderProj(); }
+    // Admin tab is asking who is currently streaming — reply if we are
+    if(ev.data.type==='admin-poll'){
+      if(_camCurrentStream && _camActivePlayer){
+        _bc.postMessage({ type: 'cam-ready', player: _camActivePlayer });
+      }
+      return;
+    }
+    if(ev.data.type==='cam-ready'){
+      // Mark this player as having an active cam (the actual MediaStream lives
+      // on the camera tab; we mark it here so the admin UI shows LIVE status)
+      if(!S.streams) S.streams = {};
+      // Store a sentinel — the actual stream object is on the other tab
+      // Video elements on the projector/admin tab won't have srcObject,
+      // but the LIVE badge and status will correctly show
+      if(ev.data.player && !S.streams[ev.data.player]){
+        S.streams[ev.data.player] = true; // sentinel: stream is live on another tab
+      }
+      renderCameras(); renderProj();
+      if(S.ain) toast('📹 '+x(ev.data.player)+' camera connected!','ok');
+    }
+    if(ev.data.type==='cam-stopped'){
+      if(S.streams) delete S.streams[ev.data.player];
+      renderCameras(); renderProj();
+      if(S.ain) toast('📹 '+x(ev.data.player)+' camera disconnected.','nf');
+    }
+    if(ev.data.type==='cam-ping'){
+      // Camera tab is alive — update sentinel
+      if(!S.streams) S.streams = {};
+      if(ev.data.player) S.streams[ev.data.player] = true;
+    }
   };
 }
+
+// ── Camera heartbeat: camera tab pings every 5s so admin knows it's still live ──
+// This is set up in startCamStream and cleared in stopCamStream
+let _camHeartbeat = null;
 
 // ── Render the camera setup screen ──
 function renderCamScreen(){
   // If already streaming, skip re-render (do not disturb live state)
   if(_camCurrentStream) return;
-  // Show step 1 (code entry) by default
-  camShowStep('code');
-  setCamFace(_camFace, true);
+
+  // Check for a saved camera session (e.g. after page reload)
+  let saved = null;
+  try { const raw = localStorage.getItem('qs_cam'); if(raw) saved = JSON.parse(raw); } catch(e){}
+
+  if(saved && saved.code && saved.player){
+    // Show a reconnect banner instead of blank step 1
+    camShowStep('code');
+    setCamFace(saved.face || 'environment', true);
+    // Pre-fill the code field
+    const inp = document.getElementById('cam-code-input');
+    if(inp) inp.value = saved.code;
+    // Show reconnect prompt
+    _camReconnectSession(saved);
+  } else {
+    camShowStep('code');
+    setCamFace(_camFace, true);
+  }
+}
+
+// Auto-reconnect a previous camera session after reload
+function _camReconnectSession(saved){
+  // Show a non-blocking reconnect notice at the top of step 1
+  const codeStep = document.getElementById('cam-step-code');
+  if(!codeStep) return;
+
+  // Remove any existing reconnect banner first
+  const existing = document.getElementById('cam-reconnect-banner');
+  if(existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'cam-reconnect-banner';
+  banner.style.cssText = 'background:rgba(91,76,255,.12);border:1px solid rgba(91,76,255,.4);border-radius:14px;padding:16px 18px;margin-bottom:18px;text-align:left;';
+  banner.innerHTML =
+    '<div style="font-size:12px;color:rgba(255,255,255,.5);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:6px">📹 Previous Session Found</div>'
+   +'<div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:4px">'+x(saved.player)+'</div>'
+   +'<div style="font-size:12px;color:rgba(255,255,255,.45);margin-bottom:12px">Code: '+x(saved.code)+'</div>'
+   +'<div style="display:flex;gap:8px">'
+   +'<button onclick="_camDoReconnect()" style="flex:1;padding:9px;border-radius:9px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">▶ Reconnect Camera</button>'
+   +'<button onclick="_camDismissReconnect()" style="padding:9px 14px;border-radius:9px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.5);font-size:13px;cursor:pointer">Dismiss</button>'
+   +'</div>';
+  codeStep.insertBefore(banner, codeStep.firstChild);
+}
+
+function _camDoReconnect(){
+  let saved = null;
+  try { const raw = localStorage.getItem('qs_cam'); if(raw) saved = JSON.parse(raw); } catch(e){}
+  if(!saved) return;
+  _camFace = saved.face || 'environment';
+  _camLoadedCode = saved.code;
+  _camSelectedPlayer = saved.player;
+  // If game state doesn't have this player, add a placeholder
+  if(S.gon && !S.players.find(p => p.name === saved.player)){
+    S.players.push({ name: saved.player, emoji: '📹', score: 0 });
+  }
+  startCamStream();
+  const b = document.getElementById('cam-reconnect-banner');
+  if(b) b.remove();
+}
+
+function _camDismissReconnect(){
+  try { localStorage.removeItem('qs_cam'); } catch(e){}
+  const b = document.getElementById('cam-reconnect-banner');
+  if(b) b.remove();
 }
 
 function camShowStep(step){
@@ -1263,6 +1358,26 @@ async function startCamStream(){
       v.srcObject=stream; v.play().catch(()=>{});
     });
 
+    // Persist camera session so it can auto-reconnect after a reload
+    try {
+      localStorage.setItem('qs_cam', JSON.stringify({
+        code: _camLoadedCode || S.gc || '',
+        player: pname,
+        face: _camFace
+      }));
+    } catch(e){}
+
+    // Start heartbeat ping so admin tab knows this camera is still live
+    if(_camHeartbeat) clearInterval(_camHeartbeat);
+    _camHeartbeat = setInterval(() => {
+      if(_bc && _camActivePlayer && _camCurrentStream) {
+        _bc.postMessage({ type: 'cam-ping', player: _camActivePlayer });
+      } else {
+        clearInterval(_camHeartbeat);
+        _camHeartbeat = null;
+      }
+    }, 5000);
+
     toast('📹 Streaming: '+pname,'ok');
     renderCameras(); renderProj();
 
@@ -1287,7 +1402,6 @@ async function flipCam(){
 }
 
 function camSwitchPlayer(){
-  // Stop stream, go back to setup step
   if(_camCurrentStream){
     _camCurrentStream.getTracks().forEach(t=>t.stop());
     _camCurrentStream=null;
@@ -1298,6 +1412,7 @@ function camSwitchPlayer(){
   }
   _camActivePlayer=null;
   _camSelectedPlayer=null;
+  try { localStorage.removeItem('qs_cam'); } catch(e){}
   if(_camLoadedCode) camBuildSetupStep(_camLoadedCode);
   camShowStep('setup');
   renderCameras(); renderProj();
@@ -1314,6 +1429,9 @@ function stopCamStream(){
     _camActivePlayer=null;
   }
   _camSelectedPlayer=null;
+  // Clear persisted camera session and stop heartbeat
+  try { localStorage.removeItem('qs_cam'); } catch(e){}
+  if(_camHeartbeat){ clearInterval(_camHeartbeat); _camHeartbeat=null; }
   const vid=document.getElementById('cam-live-vid');
   if(vid) vid.srcObject=null;
   camShowStep('code');
@@ -1798,7 +1916,9 @@ function toggleReveal(){
 function renderCameras(){
   const n=S.players.length;
   let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><div class="ptitle" style="margin-bottom:0">Camera Feeds</div><span class="tag tg">'+n+' Stream'+(n!==1?'s':'')+'</span></div>';
-  h+='<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.6"><strong style="color:var(--text)">📡 How cameras work:</strong> Each player&apos;s camera streams from their own device. Their video feeds appear here and as the background on the Projector screen.</div>';
+  // Broadcast a "who is live?" ping so any open camera tabs respond immediately
+  if(_bc) _bc.postMessage({ type: 'admin-poll' });
+  h+='<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.6"><strong style="color:var(--text)">📡 How cameras work:</strong> Open the 📷 Camera tab on any device, enter the game code, pick a player and start streaming. The feed status updates here automatically.</div>';
   if(!n){
     h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">📹</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Camera Feeds</div><div style="font-size:14px">Feeds appear once players join an active game.</div></div>';
   } else {
@@ -2103,14 +2223,46 @@ function clearAns(){document.querySelectorAll('.abtn').forEach(b=>{b.classList.r
 // ═══ SESSION RESTORE ON RELOAD ═══
 (function restoreSession(){
   // ── Admin ──
-  if(sessionStorage.getItem('qs_admin')==='1'){
+  if(localStorage.getItem('qs_admin')==='1'){
     S.ain=true;
     document.getElementById('achip').style.display='flex';
-    // Don't navigate yet — Firebase sync will populate state.
-    // Once FB fires or on timeout, go to admin.
-    const goAdmin=()=>{ go('admin'); aTab('overview',document.querySelector('.anav')); };
-    if(window._fb&&window._fb.ready()){ goAdmin(); }
-    else { window.addEventListener('fb-ready',goAdmin,{once:true}); setTimeout(goAdmin,2000); }
+
+    // Restore admin: wait for Firebase to hydrate game state first,
+    // then navigate to admin dashboard. Use a one-shot onGame listener.
+    const goAdminWithState = () => {
+      go('admin');
+      aTab('overview', document.querySelector('.anav'));
+      renderOverview();
+      updateFloatBar();
+    };
+
+    const doAdminRestore = () => {
+      // Firebase is ready — fetch current game state once
+      if(window._fb && window._fb.ready()){
+        window._fb.getGame().then(gameData => {
+          if(gameData && gameData.status === 'active'){
+            // Re-hydrate full game state from Firebase
+            S.gon = true;
+            S.gc  = gameData.gc;
+            S.curQ = gameData.curQ || 0;
+            S.paused = gameData.paused || false;
+            S.revealAns = gameData.revealAns || false;
+            S.curStep = gameData.curStep || 70;
+            if(gameData.quiz){ S.aq = gameData.quiz; }
+            else if(gameData.aqId){
+              const found = S.quizzes.find(q => q.id === gameData.aqId);
+              if(found) S.aq = found;
+            }
+          }
+          goAdminWithState();
+        }).catch(() => goAdminWithState());
+      } else {
+        goAdminWithState();
+      }
+    };
+
+    if(window._fb){ doAdminRestore(); }
+    else { window.addEventListener('fb-ready', doAdminRestore, {once:true}); setTimeout(doAdminRestore, 2500); }
     return; // admin takes priority — skip player restore
   }
 
@@ -2168,6 +2320,20 @@ function clearAns(){document.querySelectorAll('.abtn').forEach(b=>{b.classList.r
 })();
 
 // ═══ INIT ═══
+// Restore camera sentinels from localStorage so LIVE badges show immediately on reload
+(function restoreCamSentinels(){
+  try {
+    const raw = localStorage.getItem('qs_cam');
+    if(raw){
+      const saved = JSON.parse(raw);
+      if(saved && saved.player){
+        if(!S.streams) S.streams = {};
+        S.streams[saved.player] = true; // sentinel
+      }
+    }
+  } catch(e){}
+})();
+
 renderProj();
 </script>
 </body>
