@@ -43,7 +43,7 @@ try {
 }
 
 // ─── EXPOSE FB HELPERS TO GLOBAL SCOPE ───────────────────────────────────────
-// Key sanitiser — Firebase keys can't contain . # $ / [ ]
+// Key sanitiser — Firebase keys cannot contain . # $ / [ ]
 function sanitiseKey(name){ return name.replace(/[.#$\/\[\]]/g,'_'); }
 
 window._fb = {
@@ -693,7 +693,7 @@ function initFirebaseSync() {
 
   // ── Listen: players list → sync into S.players and re-render everywhere ──
   fb.onPlayers(playerArr => {
-    // Merge: preserve local emoji/score if Firebase doesn't have it yet
+    // Merge: preserve local emoji/score if Firebase does not have it yet
     S.players = playerArr.map(fp => {
       const local = S.players.find(lp => lp.name === fp.name);
       return { ...(local||{}), ...fp };
@@ -964,7 +964,7 @@ if(_bc){
 
 // ── Render the camera setup screen ──
 function renderCamScreen(){
-  // If already streaming, skip re-render (don't disturb live state)
+  // If already streaming, skip re-render (do not disturb live state)
   if(_camCurrentStream) return;
   // Show step 1 (code entry) by default
   camShowStep('code');
@@ -1000,13 +1000,13 @@ function camLoadPlayers(){
   const proceed = (gameData) => {
     // If we got a live game from Firebase, check code
     if(gameData && gameData.gc && gameData.gc !== code){
-      if(errEl){ errEl.textContent='❌ Code "'+code+'" doesn't match the live game. Check the projector screen.'; errEl.style.display='block'; }
+      if(errEl){ errEl.textContent='❌ Code "'+code+'" does not match the live game. Check the projector screen.'; errEl.style.display='block'; }
       if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
       return;
     }
     // If Firebase has no game but local S does, check against that
     if(!gameData && S.gon && S.gc && S.gc !== code){
-      if(errEl){ errEl.textContent='❌ Code "'+code+'" doesn't match the active game.'; errEl.style.display='block'; }
+      if(errEl){ errEl.textContent='❌ Code "'+code+'" does not match the active game.'; errEl.style.display='block'; }
       if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
       return;
     }
