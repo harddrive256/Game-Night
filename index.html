@@ -663,7 +663,7 @@ video{background:#000;}
         <div style="display:flex;gap:8px">
           <button onclick="flipCam()" style="padding:8px 14px;border-radius:9px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">🔄 Flip</button>
           <button onclick="camSwitchPlayer()" style="padding:8px 14px;border-radius:9px;background:rgba(91,76,255,.3);border:1px solid rgba(91,76,255,.5);color:var(--accent);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">👥 Switch</button>
-          <button onclick="stopCamStream()" style="padding:8px 14px;border-radius:9px;background:rgba(231,76,60,.25);border:1px solid rgba(231,76,60,.4);color:var(--danger);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">⏹ Stop</button>
+          <button onclick="stopCamStream()" style="padding:8px 18px;border-radius:9px;background:rgba(231,76,60,.55);border:1px solid rgba(231,76,60,.8);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;box-shadow:0 0 18px rgba(231,76,60,.35)">⏹ End Stream</button>
         </div>
       </div>
 
@@ -782,7 +782,7 @@ function initFirebaseSync() {
       // Game ended or never started
       if (S.gon) {
         S.gon=false; S.gc=null; S.aq=null;
-        S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70;
+        S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=10;
         // If player was in lobby/game, show them the "no game" state
         if (!S.ain) {
           document.getElementById('tlobby').disabled=true;
@@ -800,7 +800,7 @@ function initFirebaseSync() {
     S.curQ     = gameData.curQ   || 0;
     S.paused   = gameData.paused || false;
     S.revealAns= gameData.revealAns || false;
-    S.curStep  = gameData.curStep || 70;
+    S.curStep  = gameData.curStep || 10;
     S.pickedAns= (gameData.pickedAns !== undefined) ? gameData.pickedAns : null;
     if(gameData.lifelines) S.lifelines = gameData.lifelines;
     S.mpBonus   = gameData.mpBonus   || false;
@@ -1020,7 +1020,7 @@ function releaseGame(){
   const q=S.quizzes.find(z=>z.id===sel.value);
   if(!q)return;
   S.gon=true; S.gc=mkc(); S.aq=q; S.players=[];
-  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70; S.pickedAns=null;
+  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=10; S.pickedAns=null;
   S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
   // Write full quiz into Firebase so player devices (which have no quiz data) can load it
   const gameData={
@@ -2155,23 +2155,44 @@ function _renderProjSingle(el, qd){
     return;
   }
 
-  // ── RIGHT SIDE: Ladder — FULLY VISIBLE, no scroll ──
-  // Use position:absolute top→bottom with overflow:hidden. Each row scales to fit.
-  const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
-  const sf=[100,50], curStep=S.curStep||150;
-  // Fixed row count = 15. Panel spans from top:14 to bottom:14, minus header.
-  // Row height = calc((100vh - 58px - 28px - 38px) / 15) ≈ auto
-  h+='<div style="position:absolute;top:14px;right:14px;bottom:14px;width:148px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:7px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
-  h+='<div style="flex:1;display:flex;flex-direction:column;padding:4px 6px;gap:1px;overflow:hidden">';
-  steps.forEach((v,i)=>{
-    const cur=v===curStep, safe=sf.includes(v), past=v>curStep;
-    const bg  = cur?'background:rgba(245,200,66,.2);':past?'background:rgba(255,255,255,.02);':'';
-    const bdr = cur?'border:1px solid rgba(245,200,66,.5);':'border:1px solid transparent;';
-    const col = cur?'color:var(--gold);font-weight:700;':past?'color:rgba(255,255,255,.22);':safe?'color:var(--safe);':'color:rgba(255,255,255,.44);';
-    h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:0 5px;border-radius:4px;flex:1;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:8.5px;min-height:0">';
-    h+='<span>'+(cur?'▶ ':' ')+(safe?'🛡':'  ')+'Q'+(15-i)+'</span>';
-    h+='<span>'+(past?'✓ ':'')+v+'</span></div>';
+  // ── RIGHT SIDE: Ladder — climbs from bottom (Q1/10pts) to top (Q15/150pts) ──
+  // Panel anchors top:14 bottom:14, flex-column with rows sharing height equally.
+  // No overflow, no scroll — 15 rows share the entire available height.
+  const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150]; // bottom→top order
+  const sf=[50,100]; // safety checkpoints
+  const curStep=S.curStep||10;
+  // Track which questions have been completed (past steps) 
+  // "past" = a step the player has already earned (lower values than current)
+  // "future" = not yet reached (higher values than current)
+  // "current" = the one being played now
+  // Render top→bottom in HTML but visually bottom is Q1 (we reverse the display array)
+  const displaySteps=[...steps].reverse(); // [150,140,...,10] for top-of-DOM = visual top
+  h+='<div style="position:absolute;top:14px;right:14px;bottom:14px;width:150px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
+  h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 5px 3px">';
+  displaySteps.forEach((v,di)=>{
+    // di=0 is top row (Q15/150pts), di=14 is bottom row (Q1/10pts)
+    const qNum = steps.indexOf(v) + 1; // Q1..Q15
+    const cur  = v===curStep;
+    const past = v < curStep; // already climbed past this
+    const safe = sf.includes(v);
+    const future = v > curStep;
+    const bg  = cur  ? 'background:rgba(245,200,66,.22);' 
+               : past ? 'background:rgba(46,204,113,.06);' 
+               : '';
+    const bdr = cur  ? 'border:1px solid rgba(245,200,66,.6);' 
+               : safe&&!past ? 'border:1px solid rgba(46,204,113,.25);' 
+               : 'border:1px solid transparent;';
+    const col = cur    ? 'color:var(--gold);font-weight:700;'
+               : past  ? 'color:rgba(46,204,113,.5);'
+               : safe  ? 'color:var(--safe);'
+               : future? 'color:rgba(255,255,255,.35);'
+               : 'color:rgba(255,255,255,.4);';
+    const leftIcon = cur ? '▶' : past ? '✓' : safe ? '🛡' : '';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:0 5px;border-radius:4px;flex:1;min-height:0;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:8px;">';
+    h+='<span style="min-width:14px;text-align:center;flex-shrink:0">'+leftIcon+'</span>';
+    h+='<span style="flex:1;padding:0 3px">Q'+qNum+'</span>';
+    h+='<span style="font-weight:600">'+v+'</span></div>';
   });
   h+='</div></div>';
 
@@ -2542,7 +2563,7 @@ function relFromLib(id){
   if(S.gon){toast('End the current session first.','er');return;}
   const q=S.quizzes.find(z=>z.id===id);if(!q)return;
   S.gon=true;S.gc=mkc();S.aq=q;S.players=[];
-  S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=70;
+  S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=10;
   const gameData={
     gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:70, status:'active',
     quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
@@ -2590,12 +2611,43 @@ function renderSession(){
     h+='<button class="btn btn-sm '+(S.revealAns?'btn-safe':'btn-ghost')+'" onclick="toggleReveal()">'+(S.revealAns?'✅ Shown':'👁 Reveal')+'</button>';
     h+='</div>';
     if(fq){
+      const picked = S.pickedAns;
+      const isAnswered = picked !== null;
       h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px">';
-      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">Q'+(curQ+1)+' Preview</div>';
-      h+='<div style="font-size:14px;font-weight:600;margin-bottom:11px">'+x(fq.text)+'</div>';
+      h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
+      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600">Q'+(curQ+1)+' — Click Player&#39;s Answer</div>';
+      if(isAnswered){ h+='<span class="tag tg" style="font-size:10px">Answered</span>'; }
+      h+='</div>';
+      h+='<div style="font-size:14px;font-weight:600;margin-bottom:12px;line-height:1.5;color:var(--text)">'+x(fq.text)+'</div>';
       h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
-      fq.answers.forEach((a,i)=>{const c=i===fq.correct;h+='<div style="padding:7px 11px;background:'+(c?'rgba(46,204,113,.1)':'var(--panel)')+';border-radius:8px;font-size:12px;border:1px solid '+(c?'var(--safe)':'var(--border)')+';color:'+(c?'var(--safe)':'var(--text)')+'">'+['A','B','C','D'][i]+': '+x(a)+'</div>';});
-      h+='</div></div>';
+      fq.answers.forEach((a,i)=>{
+        const isCrct = i===fq.correct;
+        const isPk   = isAnswered && i===picked;
+        const isWrg  = isPk && !isCrct;
+        let bg, bdr, col, clickStyle='';
+        if(!isAnswered){
+          bg='var(--panel)'; bdr='var(--border)'; col='var(--text)';
+          clickStyle='cursor:pointer;transition:all .18s;';
+        } else if(isCrct){
+          bg='rgba(46,204,113,.15)'; bdr='var(--safe)'; col='var(--safe)';
+        } else if(isWrg){
+          bg='rgba(231,76,60,.15)'; bdr='var(--danger)'; col='var(--danger)';
+        } else {
+          bg='var(--panel)'; bdr='var(--border)'; col='rgba(255,255,255,.3)';
+        }
+        const onclick = !isAnswered ? 'onclick="projPickAnswer('+i+')"' : '';
+        h+='<div '+onclick+' style="padding:9px 12px;background:'+bg+';border-radius:9px;font-size:12px;font-weight:600;border:1.5px solid '+bdr+';color:'+col+';display:flex;align-items:center;gap:8px;'+clickStyle+'">';
+        h+='<span style="width:22px;height:22px;border-radius:5px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:13px;color:var(--gold);flex-shrink:0">'+['A','B','C','D'][i]+'</span>';
+        h+=x(a);
+        if(isCrct&&isAnswered) h+=' ✅';
+        if(isWrg)              h+=' ❌';
+        h+='</div>';
+      });
+      h+='</div>';
+      if(!isAnswered){
+        h+='<div style="margin-top:8px;font-size:11px;color:rgba(255,255,255,.3);text-align:center">👆 Click the answer the player chose</div>';
+      }
+      h+='</div>';
     } else {
       h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:22px;text-align:center;color:var(--muted)">This quiz has no questions yet.</div>';
     }
@@ -2633,8 +2685,8 @@ function _applyCheckpoint(currentScore){
 }
 
 function projPickAnswer(idx){
-  if(!S.ain || !S.gon) return;
-  if(S.pickedAns !== null) return;
+  if(!S.gon) return;               // game must be live
+  if(S.pickedAns !== null) return; // already answered this question
   const qd = S.aq && S.aq.questions && S.aq.questions[S.curQ||0];
   if(!qd) return;
 
@@ -2691,7 +2743,7 @@ function projNextQuestion(){
     S.revealAns = false;
     S.mpBonus   = false;
     if(S.lifelines) S.lifelines.hiddenAnswers = [];
-    const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
+    const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
     S.curStep = steps[S.curQ] || steps[steps.length-1];
     if(window._fb&&window._fb.ready())
       window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null, lifelines:S.lifelines, mpBonus:false });
@@ -2709,7 +2761,7 @@ function sessionNext(){
   const totalQ=S.aq.questions?S.aq.questions.length:0;
   if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;S.pickedAns=null;S.mpBonus=false;if(S.lifelines)S.lifelines.hiddenAnswers=[];}
   else{toast('Last question reached.','nf');return;}
-  const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
+  const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null });
   renderSession();renderProj();updateFloatBar();
@@ -2761,7 +2813,14 @@ function renderCameras(){
       else if(hasSent)    { badgeBg='#5DADE2';        badgeText='● BC Live';     badgeAnim='animation:pulse 2s infinite'; }
       h+='<div class="fcard'+(i===0?' fm':'')+'" onclick="setMain(this,\''+x(p.name)+'\')" style="cursor:pointer">';
       h+='<div class="fvid" style="position:relative">';
-      if(hasSent) h+='<video id="cam-prev-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1"></video>';
+      if(hasSent){
+        if(hasReal){
+          h+='<video id="cam-prev-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1"></video>';
+        } else {
+          // Remote stream — canvas gets painted by frame relay or WebRTC ontrack
+          h+='<canvas id="cam-prev-'+i+'" data-player="'+x(p.name)+'" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000"></canvas>';
+        }
+      }
       h+='<span style="z-index:2;position:relative">'+(hasSent?'':p.emoji)+'</span>';
       if(i===0) h+='<span style="position:absolute;top:7px;left:7px;z-index:3;background:var(--gold);color:var(--deep);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px">MAIN</span>';
       h+='<span style="position:absolute;top:7px;right:7px;z-index:3;background:'+badgeBg+';color:#fff;font-size:9px;padding:2px 8px;border-radius:20px;'+badgeAnim+'">'+badgeText+'</span>';
@@ -2778,10 +2837,21 @@ function renderCameras(){
   }
   document.getElementById('ap-cameras').innerHTML=h;
   S.players.forEach((p,i)=>{
-    const vid=document.getElementById('cam-prev-'+i);
-    if(!vid) return;
+    const el=document.getElementById('cam-prev-'+i);
+    if(!el) return;
     const stream=S.streams&&S.streams[p.name];
-    if(stream instanceof MediaStream){ vid.srcObject=stream; vid.play().catch(()=>{}); }
+    if(stream instanceof MediaStream){
+      // Real stream (same-tab camera owner or WebRTC received)
+      if(el.tagName==='VIDEO'){ el.srcObject=stream; el.play().catch(()=>{}); }
+    } else if(stream){
+      // Sentinel 'remote' — paint last canvas frame if we have one
+      const lastBmp = window._camCanvases&&window._camCanvases[p.name]&&window._camCanvases[p.name].lastBmp;
+      if(lastBmp && el.tagName==='CANVAS'){
+        el.width  = el.offsetWidth  || 480;
+        el.height = el.offsetHeight || 270;
+        try { el.getContext('2d').drawImage(lastBmp,0,0,el.width,el.height); } catch(e){}
+      }
+    }
   });
 }
 function setMain(card,name){document.querySelectorAll('.fcard').forEach(c=>c.classList.remove('fm'));card.classList.add('fm');toast(name+' set as main feed.','nf');renderCameras();}
@@ -2988,15 +3058,20 @@ function renderProj(){
     h+='<div style="position:absolute;inset:0;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:180px;opacity:.55">'+tp.emoji+'</div>';
     h+='<div style="position:absolute;top:14px;left:14px;background:var(--danger);color:#fff;font-size:10px;font-family:\'Space Mono\',monospace;padding:4px 10px;border-radius:20px;animation:pulse 2s infinite;z-index:10">● LIVE</div>';
     h+='<div style="position:absolute;top:14px;right:14px;background:rgba(0,0,0,.55);border:1px solid rgba(245,200,66,.3);border-radius:11px;padding:7px 14px;z-index:10"><div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase">Player</div><div style="font-family:Bebas Neue,cursive;font-size:22px;color:var(--gold);letter-spacing:2px">'+x(tp.name)+'</div></div>';
-    // Ladder — foreground right side
-    h+='<div style="position:absolute;top:80px;right:14px;bottom:220px;width:160px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.08);border-radius:15px;padding:10px;overflow-y:auto;z-index:20">';
-    h+='<div style="font-family:Bebas Neue,cursive;font-size:14px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:7px">LADDER</div>';
-    const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10], sf=[100,50], curStep=S.curStep||70;
-    steps.forEach((v,i)=>{
-      const cur=v===curStep,safe=sf.includes(v);
-      h+='<div style="display:flex;justify-content:space-between;padding:4px 7px;border-radius:5px;margin-bottom:2px;font-family:\'Space Mono\',monospace;font-size:10px;background:'+(cur?'rgba(245,200,66,.15)':'transparent')+';border:'+(cur?'1px solid rgba(245,200,66,.4)':'1px solid transparent')+';color:'+(cur?'var(--gold)':safe?'var(--safe)':'rgba(255,255,255,.35)')+'"><span>'+(safe?'🛡 ':'')+'Q'+(15-i)+'</span><span>'+v+'</span></div>';
-    });
-    h+='</div>';
+    // Ladder — Q1=10pts at bottom, Q15=150pts at top, no scroll
+    h+='<div style="position:absolute;top:80px;right:14px;bottom:220px;width:155px;background:rgba(0,0,0,.75);border:1px solid rgba(255,255,255,.1);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;z-index:20">';
+    h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:5px 0 4px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
+    h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:2px 5px">';
+    {const s2=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150],sf2=[50,100],cs2=S.curStep||10;
+    [...s2].reverse().forEach((v)=>{
+      const qN=s2.indexOf(v)+1,cur=v===cs2,past=v<cs2,safe=sf2.includes(v);
+      const bg=cur?'rgba(245,200,66,.2)':past?'rgba(46,204,113,.06)':'transparent';
+      const col=cur?'var(--gold)':past?'rgba(46,204,113,.5)':safe?'var(--safe)':'rgba(255,255,255,.35)';
+      const bdr=cur?'1px solid rgba(245,200,66,.5)':safe&&!past?'1px solid rgba(46,204,113,.2)':'1px solid transparent';
+      const icon=cur?'▶':past?'✓':safe?'🛡':'';
+      h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:0 5px;border-radius:4px;flex:1;min-height:0;background:'+bg+';border:'+bdr+';color:'+col+';font-family:Space Mono,monospace;font-size:8px;"><span style="min-width:14px;text-align:center">'+icon+'</span><span style="flex:1;padding:0 3px">Q'+qN+'</span><span style="font-weight:600">'+v+'</span></div>';
+    });}
+    h+='</div></div>';
     // Question box — foreground centre-bottom
     h+='<div style="position:absolute;bottom:14px;left:14px;right:190px;z-index:20">';
     h+='<div style="background:rgba(0,0,0,.82);border:2px solid rgba(91,76,255,.4);border-radius:18px;padding:20px 24px;backdrop-filter:blur(8px)">';
@@ -3081,7 +3156,7 @@ function clearAns(){document.querySelectorAll('.abtn').forEach(b=>{b.classList.r
             S.curQ = gameData.curQ || 0;
             S.paused = gameData.paused || false;
             S.revealAns = gameData.revealAns || false;
-            S.curStep = gameData.curStep || 70;
+            S.curStep = gameData.curStep || 10;
             if(gameData.quiz){ S.aq = gameData.quiz; }
             else if(gameData.aqId){
               const found = S.quizzes.find(q => q.id === gameData.aqId);
