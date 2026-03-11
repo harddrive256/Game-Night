@@ -11,7 +11,7 @@
 // Firebase Console → Project Settings → Your Apps → SDK setup → Config
 // ─────────────────────────────────────────────────────────────────────────
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, set, onValue, remove, get }
+import { getDatabase, ref, set, onValue, remove, get, push, child, onChildAdded }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const firebaseConfig = {
@@ -82,6 +82,43 @@ window._fb = {
 
   onGame:    (cb) => { if (!_fbReady) return ()=>{}; return onValue(_gameRef,    snap => cb(snap.val())); },
   onPlayers: (cb) => { if (!_fbReady) return ()=>{}; return onValue(_playersRef, snap => { const v=snap.val(); cb(v ? Object.values(v) : []); }); },
+
+  // ── WebRTC signalling via Firebase (no extra server needed) ──
+  // Each player gets a path: quizstage/webrtc/{sanitisedPlayerName}/
+  //   offer, answer, offerCandidates/, answerCandidates/
+  _webrtcRef: (player) => ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)),
+
+  webrtcSendOffer: (player, offer) => {
+    if (!_fbReady) return Promise.resolve();
+    return set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer'), offer);
+  },
+  webrtcSendAnswer: (player, answer) => {
+    if (!_fbReady) return Promise.resolve();
+    return set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer'), answer);
+  },
+  webrtcAddCandidate: (player, side, candidate) => {
+    if (!_fbReady) return Promise.resolve();
+    return push(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side), candidate);
+  },
+  webrtcOnOffer: (player, cb) => {
+    if (!_fbReady) return () => {};
+    return onValue(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer'),
+      snap => { if (snap.val()) cb(snap.val()); });
+  },
+  webrtcOnAnswer: (player, cb) => {
+    if (!_fbReady) return () => {};
+    return onValue(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer'),
+      snap => { if (snap.val()) cb(snap.val()); });
+  },
+  webrtcOnCandidates: (player, side, cb) => {
+    if (!_fbReady) return () => {};
+    return onChildAdded(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side),
+      snap => { if (snap.val()) cb(snap.val()); });
+  },
+  webrtcClear: (player) => {
+    if (!_fbReady) return Promise.resolve();
+    return remove(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)));
+  },
 };
 
 // Fire fb-ready after a tick so the main <script> listener is registered first
@@ -253,10 +290,11 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
   display:none;position:fixed;bottom:18px;right:18px;z-index:1000;
   flex-direction:column;align-items:stretch;
   background:rgba(10,10,22,.97);border:1px solid rgba(91,76,255,.45);
-  border-radius:18px;width:250px;
+  border-radius:18px;width:260px;
   backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   box-shadow:0 8px 40px rgba(0,0,0,.7),0 0 0 1px rgba(91,76,255,.08);
   overflow:hidden;transition:width .22s ease,border-radius .22s ease;
+  touch-action:none;
 }
 #admin-float-bar.visible{display:flex;}
 #admin-float-bar.afb-minimized{width:52px;border-radius:14px;}
@@ -266,9 +304,10 @@ input[type=radio]{accent-color:var(--safe);cursor:pointer;width:16px;height:16px
 #admin-float-bar.afb-minimized #afb-min-toggle{display:none;}
 #afb-min-handle{
   display:flex;align-items:center;gap:8px;padding:10px 13px;
-  cursor:pointer;border-bottom:1px solid rgba(255,255,255,.07);
+  cursor:grab;border-bottom:1px solid rgba(255,255,255,.07);
   user-select:none;
 }
+#afb-min-handle:active{cursor:grabbing;}
 #afb-min-handle:hover{background:rgba(255,255,255,.04);}
 #afb-min-icon{font-size:15px;flex-shrink:0;}
 #afb-min-label{font-family:'Space Mono',monospace;font-size:10px;letter-spacing:2px;color:var(--gold);text-transform:uppercase;font-weight:700;flex:1;}
@@ -667,7 +706,15 @@ let S={
   ain:false, gon:false, gc:null, aq:null,
   players:[], me:null, playerCode:null,
   quizzes:[], eqid:null, eqs:[], eqi:-1, qf:'all',
-  curQ:0, paused:false, revealAns:false, curStep:70
+  curQ:0, paused:false, revealAns:false, curStep:70,
+  pickedAns:null,         // 0-3 answer index admin clicked, null = none yet
+  lifelines:{             // per-game lifeline state (reset on new game/question-skip)
+    fifty:false,          // true = used (greyed out)
+    ask:false,
+    skip:false,
+    hiddenAnswers:[]      // indices of answers hidden by 50:50
+  },
+  mpBonus:false           // multiplayer bonus round: other players can earn +3
 };
 
 // ═══ FIREBASE SYNC ═══
@@ -713,6 +760,9 @@ function initFirebaseSync() {
     S.paused   = gameData.paused || false;
     S.revealAns= gameData.revealAns || false;
     S.curStep  = gameData.curStep || 70;
+    S.pickedAns= (gameData.pickedAns !== undefined) ? gameData.pickedAns : null;
+    if(gameData.lifelines) S.lifelines = gameData.lifelines;
+    S.mpBonus = gameData.mpBonus || false;
     // Re-attach the quiz object from local quizzes list
     // Load quiz: prefer embedded object (works on player devices with no local quizzes)
     if (gameData.quiz) {
@@ -928,7 +978,8 @@ function releaseGame(){
   const q=S.quizzes.find(z=>z.id===sel.value);
   if(!q)return;
   S.gon=true; S.gc=mkc(); S.aq=q; S.players=[];
-  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70;
+  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70; S.pickedAns=null;
+  S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false;
   // Write full quiz into Firebase so player devices (which have no quiz data) can load it
   const gameData={
     gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:70, status:'active',
@@ -948,7 +999,8 @@ function releaseGame(){
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
-  S.curQ=0; S.paused=false; S.revealAns=false;
+  S.curQ=0; S.paused=false; S.revealAns=false; S.pickedAns=null;
+  S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false;
   sessionStorage.removeItem('qs_player');
   document.getElementById('tlobby').disabled=true;
   document.getElementById('tgame').disabled=true;
@@ -968,10 +1020,70 @@ function adjScore(playerIdx, delta){
 function toggleFloatMin(){
   const bar=document.getElementById('admin-float-bar');
   if(!bar) return;
+  // If currently being dragged, don't toggle
+  if(bar._dragging) return;
   const isMin=bar.classList.toggle('afb-minimized');
   const tog=document.getElementById('afb-min-toggle');
   if(tog){ tog.textContent=isMin?'⌄':'⌃'; tog.title=isMin?'Expand':'Minimize'; }
 }
+
+// ── Draggable float bar — pointer events on the handle ──
+(function(){
+  const bar = document.getElementById('admin-float-bar');
+  const handle = document.getElementById('afb-min-handle');
+  if(!bar||!handle) return;
+
+  let startX=0, startY=0, startL=0, startT=0;
+  let dragged=false;
+
+  function getPos(){
+    // Ensure bar has explicit top/left (convert from bottom/right if needed)
+    const rect = bar.getBoundingClientRect();
+    return { left: rect.left, top: rect.top };
+  }
+
+  handle.addEventListener('pointerdown', e => {
+    if(e.button!==0&&e.pointerType==='mouse') return;
+    e.preventDefault();
+    dragged = false;
+    bar._dragging = false;
+
+    const pos = getPos();
+    // Switch to top/left positioning
+    bar.style.bottom = 'auto';
+    bar.style.right  = 'auto';
+    bar.style.left   = pos.left + 'px';
+    bar.style.top    = pos.top  + 'px';
+
+    startX = e.clientX;
+    startY = e.clientY;
+    startL = pos.left;
+    startT = pos.top;
+
+    handle.setPointerCapture(e.pointerId);
+    handle.style.cursor = 'grabbing';
+  });
+
+  handle.addEventListener('pointermove', e => {
+    if(!handle.hasPointerCapture(e.pointerId)) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if(Math.abs(dx)+Math.abs(dy) > 4){ dragged=true; bar._dragging=true; }
+    if(!dragged) return;
+
+    // Clamp to viewport
+    const maxL = window.innerWidth  - bar.offsetWidth;
+    const maxT = window.innerHeight - bar.offsetHeight;
+    bar.style.left = Math.max(0, Math.min(maxL, startL+dx)) + 'px';
+    bar.style.top  = Math.max(0, Math.min(maxT, startT+dy)) + 'px';
+  });
+
+  handle.addEventListener('pointerup', e => {
+    handle.style.cursor = 'grab';
+    // Allow toggle click only if we didn't drag
+    setTimeout(()=>{ bar._dragging=false; }, 50);
+  });
+})();
 
 // ── Update the floating admin panel — visible on ALL screens when admin + game live ──
 function updateFloatBar(){
@@ -1024,60 +1136,349 @@ function updateFloatBar(){
 
 // ════════════════════════════════════════════════════════════
 // CAMERA DEVICE SYSTEM
-// Any separate device opens the 📷 Camera tab, enters the
-// game code, picks a player, selects a camera, and streams.
-// MediaStream stored in S.streams[playerName]; shared to other
-// same-origin tabs via BroadcastChannel.
+// Architecture:
+//  1. BroadcastChannel — same-device same-browser tab sync
+//     (frame relay with ImageBitmap for same-device use)
+//  2. WebRTC via Firebase signalling — cross-device streaming
+//     Camera device: caller  → creates offer → Firebase
+//     Projector device: answerer → reads offer, sends answer
+//     ICE candidates exchanged via Firebase
+//     Video flows peer-to-peer after handshake
 // ════════════════════════════════════════════════════════════
 if(!S.streams) S.streams={};
-let _camFace = 'environment'; // back cam = filming others
+let _camFace = 'environment';
 let _camActivePlayer = null;
 let _camCurrentStream = null;
-let _camSelectedPlayer = null; // highlighted card selection
-let _camLoadedCode = null;     // game code entered on this cam device
+let _camSelectedPlayer = null;
+let _camLoadedCode = null;
 
-// BroadcastChannel — notify other tabs on the same origin
+// BroadcastChannel — same-origin same-browser tab sync
 const _bc = (() => {
   try { return new BroadcastChannel('quizstage_cam'); } catch(e){ return null; }
 })();
+
+// ════════════════════════════════════════════════════════════
+// WebRTC ENGINE
+// STUN = helps devices discover their public IPs so they can
+// connect directly. No video touches Google's server.
+// ════════════════════════════════════════════════════════════
+const _STUN = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ]
+};
+
+// Active RTCPeerConnections — keyed by playerName
+// Camera tab:    _rtcCallers[pname]  = RTCPeerConnection (caller/offerer)
+// Receiver tabs: _rtcAnswerers[pname] = RTCPeerConnection (answerer)
+if(!window._rtcCallers)   window._rtcCallers   = {};
+if(!window._rtcAnswerers) window._rtcAnswerers = {};
+// Firebase listener unsubscribe handles
+if(!window._rtcListeners) window._rtcListeners = {};
+
+// ── CALLER side (camera tab): start streaming to all peers ──
+async function rtcStartCall(stream, pname) {
+  // Clean up any previous call for this player
+  rtcStopCall(pname);
+
+  if (!window._fb || !window._fb.ready()) {
+    console.warn('[WebRTC] Firebase not ready — cross-device streaming unavailable');
+    return;
+  }
+
+  console.log('[WebRTC] Starting call for', pname);
+
+  // Clear any stale signalling data from previous session
+  await window._fb.webrtcClear(pname).catch(() => {});
+
+  const pc = new RTCPeerConnection(_STUN);
+  window._rtcCallers[pname] = pc;
+
+  // Add all camera tracks to this connection
+  stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+  // ICE candidate discovery — send each one to Firebase as found
+  pc.onicecandidate = e => {
+    if (e.candidate && window._fb && window._fb.ready()) {
+      window._fb.webrtcAddCandidate(pname, 'offerCandidates', e.candidate.toJSON())
+        .catch(() => {});
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('[WebRTC] Caller state:', pc.connectionState, '(', pname, ')');
+    if (pc.connectionState === 'connected') {
+      toast('📹 '+x(pname)+' live on projector via WebRTC ✓', 'ok');
+    }
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      toast('📹 WebRTC link dropped — reconnecting…', 'nf');
+      // Auto-retry after 3 seconds
+      setTimeout(() => {
+        if (_camCurrentStream && _camActivePlayer === pname) {
+          rtcStartCall(_camCurrentStream, pname);
+        }
+      }, 3000);
+    }
+  };
+
+  // Build and send the SDP offer
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await window._fb.webrtcSendOffer(pname, { type: offer.type, sdp: offer.sdp });
+  console.log('[WebRTC] Offer sent for', pname);
+
+  // Listen for the answerer's SDP answer
+  const unsubAnswer = window._fb.webrtcOnAnswer(pname, async answer => {
+    if (pc.signalingState === 'have-local-offer') {
+      await pc.setRemoteDescription(new RTCSessionDescription(answer)).catch(console.warn);
+      console.log('[WebRTC] Answer received and set for', pname);
+    }
+  });
+
+  // Listen for answerer's ICE candidates
+  const unsubAnswerCand = window._fb.webrtcOnCandidates(pname, 'answerCandidates', async cand => {
+    if (pc.remoteDescription) {
+      await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
+    }
+  });
+
+  if (!window._rtcListeners[pname]) window._rtcListeners[pname] = {};
+  window._rtcListeners[pname].unsubAnswer = unsubAnswer;
+  window._rtcListeners[pname].unsubAnswerCand = unsubAnswerCand;
+}
+
+// ── Stop a caller-side peer connection ──
+function rtcStopCall(pname) {
+  const pc = window._rtcCallers[pname];
+  if (pc) { pc.close(); delete window._rtcCallers[pname]; }
+  const ls = window._rtcListeners[pname];
+  if (ls) {
+    if (ls.unsubAnswer) ls.unsubAnswer();
+    if (ls.unsubAnswerCand) ls.unsubAnswerCand();
+    delete window._rtcListeners[pname];
+  }
+  if (window._fb && window._fb.ready()) window._fb.webrtcClear(pname).catch(() => {});
+}
+
+// ── ANSWERER side (projector/admin tab): receive stream from camera ──
+async function rtcStartReceive(pname) {
+  // Avoid creating a second connection if one already exists and is healthy
+  const existing = window._rtcAnswerers[pname];
+  if (existing && (existing.connectionState === 'connected' || existing.connectionState === 'connecting')) {
+    return;
+  }
+
+  if (!window._fb || !window._fb.ready()) return;
+
+  console.log('[WebRTC] Starting receive for', pname);
+
+  const pc = new RTCPeerConnection(_STUN);
+  window._rtcAnswerers[pname] = pc;
+
+  // When remote tracks arrive, store as real MediaStream and wire to video elements
+  pc.ontrack = e => {
+    const stream = e.streams[0];
+    if (!stream) return;
+    console.log('[WebRTC] Track received for', pname);
+    S.streams[pname] = stream;           // real MediaStream — _mediaEl will now render <video>
+    // Wire to any already-rendered video elements immediately
+    document.querySelectorAll('video[data-player="'+CSS.escape(pname)+'"]').forEach(v => {
+      v.srcObject = stream;
+      v.play().catch(() => {});
+    });
+    // Re-render projection so canvas→video upgrade happens
+    renderProj();
+  };
+
+  pc.onicecandidate = e => {
+    if (e.candidate && window._fb && window._fb.ready()) {
+      window._fb.webrtcAddCandidate(pname, 'answerCandidates', e.candidate.toJSON()).catch(() => {});
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('[WebRTC] Receiver state:', pc.connectionState, '(', pname, ')');
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      // Clean up — will be re-triggered next time renderProj calls rtcStartReceive
+      delete window._rtcAnswerers[pname];
+    }
+  };
+
+  // Listen for the caller's offer on Firebase
+  const unsubOffer = window._fb.webrtcOnOffer(pname, async offer => {
+    if (pc.signalingState !== 'stable') return;
+    console.log('[WebRTC] Offer received for', pname);
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await window._fb.webrtcSendAnswer(pname, { type: answer.type, sdp: answer.sdp });
+      console.log('[WebRTC] Answer sent for', pname);
+    } catch(err) { console.warn('[WebRTC] Offer handling error:', err); }
+  });
+
+  // Listen for caller's ICE candidates
+  const unsubOfferCand = window._fb.webrtcOnCandidates(pname, 'offerCandidates', async cand => {
+    if (pc.remoteDescription) {
+      await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
+    }
+  });
+
+  if (!window._rtcListeners[pname]) window._rtcListeners[pname] = {};
+  window._rtcListeners[pname].unsubOffer = unsubOffer;
+  window._rtcListeners[pname].unsubOfferCand = unsubOfferCand;
+}
+
+// ── Stop a receiver-side peer connection ──
+function rtcStopReceive(pname) {
+  const pc = window._rtcAnswerers[pname];
+  if (pc) { pc.close(); delete window._rtcAnswerers[pname]; }
+  const ls = window._rtcListeners[pname];
+  if (ls) {
+    if (ls.unsubOffer) ls.unsubOffer();
+    if (ls.unsubOfferCand) ls.unsubOfferCand();
+  }
+}
+
+// ── Start receiving for all players who have a cam-ready sentinel ──
+// Called from renderProj so the connection is established as soon as
+// the projector screen renders with a player who has an active camera
+function rtcEnsureReceiving() {
+  if (!S.gon) return;
+  S.players.forEach(p => {
+    // Only try to receive if: there's a sentinel (cam is live), we don't already
+    // have a real MediaStream (that would mean we're the camera tab itself),
+    // and we're not already connected as answerer
+    const sentinel = S.streams[p.name];
+    const hasRealStream = sentinel instanceof MediaStream;
+    if (sentinel && !hasRealStream) {
+      rtcStartReceive(p.name);
+    }
+  });
+}
+// ── Per-player canvas elements receiving cross-tab frames ──
+// Key: playerName → { canvas, ctx, active }
+if(!window._camCanvases) window._camCanvases = {};
+
+// ── Frame relay helpers ──
+let _frameRelayInterval = null;
+
+function _startFrameRelay(stream, pname){
+  if(_frameRelayInterval) clearInterval(_frameRelayInterval);
+  // Offscreen video to read frames from the live MediaStream
+  const offVid = document.createElement('video');
+  offVid.srcObject = stream;
+  offVid.muted = true;
+  offVid.play().catch(()=>{});
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width  = 480; // relay at reduced res for BC performance
+  offCanvas.height = 270;
+  const offCtx = offCanvas.getContext('2d');
+
+  _frameRelayInterval = setInterval(() => {
+    if(!_camCurrentStream || !_bc) return;
+    try {
+      offCtx.drawImage(offVid, 0, 0, 480, 270);
+      offCanvas.transferControlToOffscreen
+        ? null // don't use offscreen path here
+        : null;
+      // createImageBitmap is transferable and efficient
+      createImageBitmap(offCanvas).then(bmp => {
+        if(!_bc) return;
+        _bc.postMessage({ type:'cam-frame', player: pname, bmp }, [bmp]);
+      }).catch(()=>{});
+    } catch(e){}
+  }, 66); // ~15fps — smooth enough, low bandwidth
+}
+
+function _stopFrameRelay(){
+  if(_frameRelayInterval){ clearInterval(_frameRelayInterval); _frameRelayInterval=null; }
+}
+
+// ── Draw an incoming frame onto the correct canvas element ──
+function _applyFrame(pname, bmp){
+  // Find all canvas elements tagged for this player and draw
+  document.querySelectorAll('canvas[data-player="'+CSS.escape(pname)+'"]').forEach(cv => {
+    cv.width  = cv.offsetWidth  || bmp.width;
+    cv.height = cv.offsetHeight || bmp.height;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
+  });
+  // Also keep a latest-frame reference so newly rendered canvases catch up
+  if(!window._camCanvases[pname]) window._camCanvases[pname] = {};
+  window._camCanvases[pname].lastBmp = bmp;
+  window._camCanvases[pname].active = true;
+}
+
+// ── Attach latest frame to a freshly rendered canvas ──
+function attachStream(canvasOrVideoEl, playerName){
+  if(!canvasOrVideoEl) return;
+  // If the element is a real <video> on the camera tab itself, use srcObject
+  if(S.streams[playerName] instanceof MediaStream){
+    if(canvasOrVideoEl.tagName === 'VIDEO'){
+      canvasOrVideoEl.srcObject = S.streams[playerName];
+      canvasOrVideoEl.play().catch(()=>{});
+    }
+    return;
+  }
+  // Otherwise we're on a receiver tab — the canvas will be painted by frame relay
+  // Paint the last received frame immediately so there's no blank flash
+  if(window._camCanvases[playerName] && window._camCanvases[playerName].lastBmp){
+    try {
+      const cv = canvasOrVideoEl;
+      cv.width  = cv.offsetWidth  || 480;
+      cv.height = cv.offsetHeight || 270;
+      cv.getContext('2d').drawImage(window._camCanvases[playerName].lastBmp, 0, 0, cv.width, cv.height);
+    } catch(e){}
+  }
+}
+
 if(_bc){
   _bc.onmessage = ev => {
     if(!ev.data) return;
-    // Admin tab is asking who is currently streaming — reply if we are
+
+    // Admin tab polling — camera tab replies if it's streaming
     if(ev.data.type==='admin-poll'){
       if(_camCurrentStream && _camActivePlayer){
-        _bc.postMessage({ type: 'cam-ready', player: _camActivePlayer });
+        _bc.postMessage({ type:'cam-ready', player:_camActivePlayer });
       }
       return;
     }
+
+    // Incoming video frame from camera tab
+    if(ev.data.type==='cam-frame'){
+      _applyFrame(ev.data.player, ev.data.bmp);
+      return;
+    }
+
     if(ev.data.type==='cam-ready'){
-      // Mark this player as having an active cam (the actual MediaStream lives
-      // on the camera tab; we mark it here so the admin UI shows LIVE status)
       if(!S.streams) S.streams = {};
-      // Store a sentinel — the actual stream object is on the other tab
-      // Video elements on the projector/admin tab won't have srcObject,
-      // but the LIVE badge and status will correctly show
-      if(ev.data.player && !S.streams[ev.data.player]){
-        S.streams[ev.data.player] = true; // sentinel: stream is live on another tab
-      }
-      renderCameras(); renderProj();
+      // Mark as active with sentinel (real MediaStream lives on camera tab or via WebRTC)
+      if(ev.data.player) S.streams[ev.data.player] = S.streams[ev.data.player] instanceof MediaStream
+        ? S.streams[ev.data.player]  // already have real stream via WebRTC — keep it
+        : 'remote';                   // same-browser: use sentinel + frame relay
+      if(window._camCanvases[ev.data.player]) window._camCanvases[ev.data.player].active = true;
+      renderCameras(); renderProj(); // renderProj will call rtcEnsureReceiving
       if(S.ain) toast('📹 '+x(ev.data.player)+' camera connected!','ok');
     }
+
     if(ev.data.type==='cam-stopped'){
       if(S.streams) delete S.streams[ev.data.player];
+      if(window._camCanvases[ev.data.player]) window._camCanvases[ev.data.player].active = false;
+      rtcStopReceive(ev.data.player);  // close WebRTC receive connection
       renderCameras(); renderProj();
       if(S.ain) toast('📹 '+x(ev.data.player)+' camera disconnected.','nf');
     }
+
     if(ev.data.type==='cam-ping'){
-      // Camera tab is alive — update sentinel
       if(!S.streams) S.streams = {};
-      if(ev.data.player) S.streams[ev.data.player] = true;
+      if(ev.data.player) S.streams[ev.data.player] = S.streams[ev.data.player] || 'remote';
     }
   };
 }
 
-// ── Camera heartbeat: camera tab pings every 5s so admin knows it's still live ──
-// This is set up in startCamStream and cleared in stopCamStream
+// ── Camera heartbeat ──
 let _camHeartbeat = null;
 
 // ── Render the camera setup screen ──
@@ -1353,10 +1754,16 @@ async function startCamStream(){
     // Switch to live view
     camShowStep('live');
 
-    // Attach to any already-rendered video elements for this player
+    // Attach to any already-rendered video elements for this player (same tab)
     document.querySelectorAll('video[data-player="'+pname+'"]').forEach(v=>{
       v.srcObject=stream; v.play().catch(()=>{});
     });
+
+    // Start relaying frames to same-browser sibling tabs (projector open in same browser)
+    _startFrameRelay(stream, pname);
+
+    // Start WebRTC call so cross-device viewers (different phones/laptops) get the feed
+    rtcStartCall(stream, pname);
 
     // Persist camera session so it can auto-reconnect after a reload
     try {
@@ -1407,6 +1814,7 @@ function camSwitchPlayer(){
     _camCurrentStream=null;
   }
   if(_camActivePlayer){
+    rtcStopCall(_camActivePlayer);
     delete S.streams[_camActivePlayer];
     if(_bc) _bc.postMessage({type:'cam-stopped', player:_camActivePlayer});
   }
@@ -1432,6 +1840,9 @@ function stopCamStream(){
   // Clear persisted camera session and stop heartbeat
   try { localStorage.removeItem('qs_cam'); } catch(e){}
   if(_camHeartbeat){ clearInterval(_camHeartbeat); _camHeartbeat=null; }
+  _stopFrameRelay();
+  // Stop WebRTC peer connection for this player
+  if(_camActivePlayer) rtcStopCall(_camActivePlayer);
   const vid=document.getElementById('cam-live-vid');
   if(vid) vid.srcObject=null;
   camShowStep('code');
@@ -1449,6 +1860,102 @@ function attachStream(videoEl, playerName){
 
 // ── no-op legacy shim ──
 async function requestCameraForPlayer(){ return null; }
+
+// ── Build the right media element for a player slot ──
+// On the camera tab (same tab that owns the stream): renders a <video>
+// On all other tabs: renders a <canvas> that frame relay will paint
+function _mediaEl(id, pname, styleExtra){
+  const style = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000;' + (styleExtra||'');
+  const hasRealStream = S.streams[pname] instanceof MediaStream;
+  if(hasRealStream){
+    return '<video id="'+id+'" data-player="'+x(pname)+'" autoplay playsinline muted style="'+style+'"></video>';
+  } else {
+    return '<canvas id="'+id+'" data-player="'+x(pname)+'" style="'+style+'"></canvas>';
+  }
+}
+
+// ── After innerHTML is set, attach real stream or paint last frame ──
+function _attachMedia(id, pname){
+  const el = document.getElementById(id);
+  if(!el) return;
+  if(S.streams[pname] instanceof MediaStream){
+    // Same-tab stream — wire srcObject directly
+    el.srcObject = S.streams[pname];
+    el.play().catch(()=>{});
+    el.onplaying = () => {
+      const ph = document.getElementById(id.replace('proj-vid','proj-ph').replace('cam-prev','proj-ph'));
+      if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
+    };
+  } else if(S.streams[pname]){
+    // Remote stream — paint last received frame if any, canvas will continue getting frames
+    attachStream(el, pname);
+    // Hide placeholder since a remote stream is active
+    const ph = document.getElementById(id.replace('proj-vid-main','proj-vid-ph').replace('proj-vid-','proj-ph-'));
+    if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },300); }
+  }
+}
+
+// ═══ LIFELINES ═══
+function useFiftyFifty(){
+  if(!S.ain||!S.gon) return;
+  if(S.lifelines.fifty){ toast('50:50 already used','er'); return; }
+  const qd = S.aq&&S.aq.questions&&S.aq.questions[S.curQ||0];
+  if(!qd) return;
+  S.lifelines.fifty = true;
+  // Pick 2 wrong answers to hide — keep correct + 1 random wrong visible
+  const wrongs = [0,1,2,3].filter(i=>i!==qd.correct);
+  // shuffle wrongs, hide 2
+  for(let i=wrongs.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[wrongs[i],wrongs[j]]=[wrongs[j],wrongs[i]];}
+  S.lifelines.hiddenAnswers = wrongs.slice(0,2);
+  _pushGameState();
+  renderProj(); renderSession(); updateFloatBar();
+  toast('50:50 used — two wrong answers removed','ok');
+}
+
+function useAskAnyone(){
+  if(!S.ain||!S.gon) return;
+  if(S.lifelines.ask){ toast('Ask Anyone already used','er'); return; }
+  S.lifelines.ask = true;
+  _pushGameState();
+  renderProj(); renderSession(); updateFloatBar();
+  toast('Ask Anyone — player may consult someone','nf');
+}
+
+function useSkip(){
+  if(!S.ain||!S.gon) return;
+  if(S.lifelines.skip){ toast('Skip already used','er'); return; }
+  S.lifelines.skip = true;
+  _pushGameState();
+  // Skip = advance without scoring, reset hidden answers
+  S.lifelines.hiddenAnswers = [];
+  toast('Question skipped!','nf');
+  projNextQuestion();
+}
+
+function toggleMpBonus(){
+  if(!S.ain||!S.gon) return;
+  S.mpBonus = !S.mpBonus;
+  _pushGameState();
+  renderProj(); renderSession(); updateFloatBar();
+  toast(S.mpBonus ? '🎁 Bonus round active — players can earn +3' : 'Bonus round ended','nf');
+}
+
+// Award +3 bonus to a player in multiplayer bonus round
+function mpBonusAward(playerIdx){
+  if(!S.ain||!S.gon) return;
+  const p = S.players[playerIdx];
+  if(!p) return;
+  p.score = (p.score||0) + 3;
+  if(window._fb&&window._fb.ready()) window._fb.updatePlayer(p.name,{score:p.score});
+  toast('🎁 +3 bonus → '+p.name,'ok');
+  renderProj(); renderSession(); updateFloatBar();
+}
+
+// Shared Firebase push helper
+function _pushGameState(){
+  if(window._fb&&window._fb.ready())
+    window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:S.pickedAns, lifelines:S.lifelines, mpBonus:S.mpBonus });
+}
 
 // ═══ PROJECTOR ═══
 function getMode(){ return (S.aq&&S.aq.mode)||'single'; }
@@ -1473,86 +1980,157 @@ function renderProj(){
   } else {
     _renderProjMulti(el, qd);
   }
+
+  // Auto-start WebRTC receive for any players with live cameras
+  // (no-op if already connected or if this is the camera tab itself)
+  rtcEnsureReceiving();
 }
 
 // ── SINGLE PLAYER projection ──
-// Layout: video background full-screen | questions bottom-center | ladder right | score chip top-right
+// Layout: video bg | ladder right (fully visible, no scroll) | question+lifelines+answers bottom-left
 function _renderProjSingle(el, qd){
   const tp=S.players[0]||{emoji:'🎭',name:'Waiting for player…',score:0};
+  const ll=S.lifelines||{fifty:false,ask:false,skip:false,hiddenAnswers:[]};
+  const hidden=ll.hiddenAnswers||[];
+  const picked=S.pickedAns;
+  const revealed=picked!==null;
   let h='';
 
-  // Full-screen video background
-  h+='<video id="proj-vid-main" data-player="'+x(tp.name)+'" autoplay playsinline muted '
-    +'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000"></video>';
+  // ── Layer 1: full-screen video/canvas ──
+  h+=_mediaEl('proj-vid-main', tp.name);
 
-  // Emoji placeholder (fades when video connects)
-  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(100px,16vw,200px);opacity:.5">'+tp.emoji+'</div>';
+  // ── Layer 2: emoji placeholder ──
+  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.5">'+tp.emoji+'</div>';
 
-  // Bottom gradient for text legibility
-  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:60%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.9) 0%,transparent 100%);pointer-events:none"></div>';
+  // ── Layer 3: bottom gradient vignette ──
+  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.92) 0%,transparent 100%);pointer-events:none"></div>';
 
-  // LIVE badge — top left
-  h+='<div style="position:absolute;top:20px;left:20px;z-index:20;background:var(--danger);color:#fff;font-size:11px;font-family:Space Mono,monospace;padding:5px 14px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
+  // ── LIVE badge — top left ──
+  h+='<div style="position:absolute;top:18px;left:18px;z-index:20;background:var(--danger);color:#fff;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
 
-  // Player chip — top right (name + score)
-  h+='<div style="position:absolute;top:20px;right:20px;z-index:20;background:rgba(0,0,0,.72);border:1px solid rgba(245,200,66,.45);border-radius:16px;padding:12px 20px;backdrop-filter:blur(12px);text-align:right">';
-  h+='<div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">Contestant</div>';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:30px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
-  h+='<div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:6px">';
+  // ── Contestant chip — below LIVE badge ──
+  h+='<div style="position:absolute;top:60px;left:18px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.38);border-radius:14px;padding:10px 16px;backdrop-filter:blur(12px)">';
+  h+='<div style="font-size:9px;color:rgba(255,255,255,.38);letter-spacing:1px;text-transform:uppercase;margin-bottom:2px">Contestant</div>';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:26px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
+  h+='<div style="display:flex;align-items:center;gap:7px;margin-top:5px">';
   if(S.ain){
-    h+='<button onclick="adjScore(0,-10)" style="width:28px;height:28px;border-radius:7px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.25);color:#fff;font-size:16px;font-weight:900;cursor:pointer;line-height:1">−</button>';
+    h+='<button onclick="adjScore(0,-10)" style="width:26px;height:26px;border-radius:6px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.22);color:#fff;font-size:15px;font-weight:900;cursor:pointer;line-height:1">−</button>';
   }
-  h+='<span style="font-family:Space Mono,monospace;font-size:18px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
+  h+='<span style="font-family:Space Mono,monospace;font-size:16px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
   if(S.ain){
-    h+='<button onclick="adjScore(0,10)" style="width:28px;height:28px;border-radius:7px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.25);color:#fff;font-size:16px;font-weight:900;cursor:pointer;line-height:1">+</button>';
+    h+='<button onclick="adjScore(0,10)" style="width:26px;height:26px;border-radius:6px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.22);color:#fff;font-size:15px;font-weight:900;cursor:pointer;line-height:1">+</button>';
   }
   h+='</div></div>';
 
-  // RIGHT: Ladder panel
+  // ── RIGHT SIDE: Ladder — fully visible, NO overflow/scroll ──
+  // Panel height is dynamic: title(28) + 15 rows × 24px + padding(20) = ~388px
   const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
   const sf=[100,50], curStep=S.curStep||150;
-  h+='<div style="position:absolute;top:88px;right:20px;bottom:260px;width:160px;z-index:20;background:rgba(0,0,0,.82);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:12px;overflow-y:auto;backdrop-filter:blur(10px)">';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:13px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:8px">LADDER</div>';
+  h+='<div style="position:absolute;top:18px;right:18px;width:152px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 8px;backdrop-filter:blur(10px);overflow:visible">';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:12px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:5px">LADDER</div>';
   steps.forEach((v,i)=>{
-    const cur=v===curStep, safe=sf.includes(v);
-    h+='<div style="display:flex;justify-content:space-between;padding:4px 7px;border-radius:5px;margin-bottom:2px;font-family:Space Mono,monospace;font-size:10px;background:'+(cur?'rgba(245,200,66,.2)':'transparent')+';border:'+(cur?'1px solid rgba(245,200,66,.55)':'1px solid transparent')+';color:'+(cur?'var(--gold)':safe?'var(--safe)':'rgba(255,255,255,.38)')+'"><span>'+(safe?'🛡 ':'')+'Q'+(15-i)+'</span><span>'+v+'</span></div>';
+    const cur=v===curStep, safe=sf.includes(v), past=v>curStep;
+    const rowBg  = cur ? 'background:rgba(245,200,66,.2);' : past ? 'background:rgba(255,255,255,.02);' : '';
+    const rowBdr = cur ? 'border:1px solid rgba(245,200,66,.5);' : 'border:1px solid transparent;';
+    const rowCol = cur ? 'color:var(--gold);font-weight:700;'
+                  : past ? 'color:rgba(255,255,255,.22);'
+                  : safe ? 'color:var(--safe);'
+                  : 'color:rgba(255,255,255,.44);';
+    h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 6px;border-radius:5px;'+rowBg+rowBdr+rowCol+'font-family:Space Mono,monospace;font-size:9px;">';
+    h+='<span>'+(cur?'▶ ':' ')+(safe?'🛡':'  ')+'Q'+(15-i)+'</span>';
+    h+='<span>'+(past?'✓ ':'')+v+'</span></div>';
   });
   h+='</div>';
 
-  // BOTTOM: Question + answers (left of ladder)
-  h+='<div style="position:absolute;bottom:18px;left:18px;right:198px;z-index:20">';
-  h+='<div style="background:rgba(0,0,0,.88);border:2px solid rgba(91,76,255,.55);border-radius:20px;padding:22px 26px;backdrop-filter:blur(14px)">';
-  h+='<div style="font-family:Space Mono,monospace;color:var(--gold);font-size:11px;margin-bottom:11px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+  // ── BOTTOM: Question card — left of ladder ──
+  h+='<div style="position:absolute;bottom:16px;left:16px;right:188px;z-index:20">';
+  h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.5);border-radius:18px;padding:16px 20px;backdrop-filter:blur(14px)">';
+
+  // Title bar
+  h+='<div style="font-family:Space Mono,monospace;color:rgba(245,200,66,.7);font-size:9.5px;margin-bottom:10px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+
   if(S.paused){
-    h+='<div style="font-size:clamp(18px,2vw,26px);font-weight:700;color:var(--warn);text-align:center;padding:18px 0;letter-spacing:3px">⏸ PAUSED</div>';
+    h+='<div style="font-size:clamp(18px,2vw,26px);font-weight:700;color:var(--warn);text-align:center;padding:16px 0;letter-spacing:3px">⏸ PAUSED</div>';
   } else {
-    h+='<div style="font-size:clamp(14px,1.6vw,21px);font-weight:600;line-height:1.45;color:#fff;margin-bottom:16px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
-    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+
+    // ── LIFELINES — always visible on projector, only clickable by admin ──
+    // Icons: 🪙 = 50:50 (coin/split)  📞 = Ask (phone a friend)  🔀 = Skip (shuffle/pass)
+    const llBtn = (icon, label, title, used, fn) => {
+      const usedStyle = 'opacity:.28;filter:grayscale(1);cursor:not-allowed;background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.08);';
+      const liveStyle = 'opacity:1;background:rgba(91,76,255,.2);border-color:rgba(91,76,255,.65);cursor:pointer;';
+      const disabled  = used || !S.ain;
+      const clickable = !used && S.ain;
+      return '<div title="'+title+'" style="display:flex;flex-direction:column;align-items:center;gap:3px;flex:1">'
+        +'<button '+(disabled?'disabled':('onclick="'+fn+'()"'))
+        +' style="width:46px;height:46px;border-radius:13px;border:2px solid;font-size:24px;'
+        +(used?usedStyle:liveStyle)
+        +'display:flex;align-items:center;justify-content:center;transition:all .2s;">'
+        +icon+'</button>'
+        +'<span style="font-size:8.5px;font-family:Space Mono,monospace;letter-spacing:.5px;'
+        +(used?'color:rgba(255,255,255,.2);text-decoration:line-through;':'color:rgba(255,255,255,.5);')+'">'+label+'</span>'
+        +'</div>';
+    };
+    h+='<div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:13px;padding:10px 8px;background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.07);border-radius:12px">';
+    h+='<div style="font-size:9px;color:rgba(255,255,255,.3);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;writing-mode:vertical-rl;text-orientation:mixed;padding-right:4px;align-self:center">LIFE<br>LINES</div>';
+    h+=llBtn('🪙','50 : 50','50:50 — Removes two wrong answers, leaving one correct and one wrong', ll.fifty,'useFiftyFifty');
+    h+=llBtn('📞','Ask','Ask Anyone — Player can consult someone in the room', ll.ask,'useAskAnyone');
+    h+=llBtn('⏭️','Skip','Skip — Pass this question without penalty', ll.skip,'useSkip');
+    h+='</div>';
+
+    // Question text
+    h+='<div style="font-size:clamp(12px,1.4vw,18px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:12px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+
+    // Answers grid — 2×2
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
     (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
-      const isC=S.revealAns&&qd&&i===qd.correct;
-      h+='<div style="background:'+(isC?'rgba(46,204,113,.2)':'rgba(255,255,255,.07)')+';border:2px solid '+(isC?'rgba(46,204,113,.8)':'rgba(255,255,255,.15)')+';border-radius:12px;padding:12px 15px;display:flex;align-items:center;gap:10px;transition:all .4s">';
-      h+='<div style="width:30px;height:30px;border-radius:8px;background:'+(isC?'rgba(46,204,113,.35)':'rgba(255,255,255,.1)')+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:18px;color:'+(isC?'var(--safe)':'var(--gold)')+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
-      h+='<div style="font-size:14px;color:'+(isC?'var(--safe)':'#fff')+';font-weight:500">'+x(a)+'</div></div>';
+      const isHidden  = hidden.includes(i) && !revealed;
+      const isCorrect = qd && i===qd.correct;
+      const isPicked  = picked!==null && i===picked;
+      const isWrong   = isPicked && !isCorrect;
+      let bg,bdr,col,cursor='';
+      if(isHidden){
+        bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.05)'; col='rgba(255,255,255,.12)';
+      } else if(!revealed){
+        bg='rgba(255,255,255,.07)'; bdr='rgba(255,255,255,.14)'; col='#fff';
+        if(S.ain) cursor='cursor:pointer;';
+      } else if(isCorrect){
+        bg='rgba(46,204,113,.22)'; bdr='rgba(46,204,113,.85)'; col='var(--safe)';
+      } else if(isWrong){
+        bg='rgba(231,76,60,.18)'; bdr='rgba(231,76,60,.8)'; col='var(--danger)';
+      } else {
+        bg='rgba(255,255,255,.03)'; bdr='rgba(255,255,255,.06)'; col='rgba(255,255,255,.25)';
+      }
+      const lBg  = isHidden?'rgba(255,255,255,.04)':!revealed?'rgba(255,255,255,.1)':isCorrect?'rgba(46,204,113,.35)':isWrong?'rgba(231,76,60,.35)':'rgba(255,255,255,.05)';
+      const lCol = isHidden?'rgba(255,255,255,.1)':!revealed?'var(--gold)':isCorrect?'var(--safe)':isWrong?'var(--danger)':'rgba(255,255,255,.2)';
+      const shadow=(isCorrect&&revealed)?'box-shadow:0 0 16px rgba(46,204,113,.35);':(isWrong)?'box-shadow:0 0 14px rgba(231,76,60,.3);':'';
+      const clickable=S.ain&&!revealed&&!isHidden;
+      h+='<div '+(clickable?'onclick="projPickAnswer('+i+')"':'')+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:11px;padding:9px 12px;display:flex;align-items:center;gap:8px;transition:all .3s;'+cursor+(clickable?'user-select:none;':'')+shadow+'">';
+      h+='<div style="width:26px;height:26px;border-radius:6px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:15px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:12px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
+      if(isCorrect&&revealed) h+='<span style="font-size:14px">✅</span>';
+      if(isWrong)             h+='<span style="font-size:14px">❌</span>';
+      h+='</div>';
     });
     h+='</div>';
+
+    // After answer — next Q / complete
+    if(revealed && S.ain){
+      const isLastQ=(S.curQ||0)>=(S.aq.questions?S.aq.questions.length-1:0);
+      if(!isLastQ){
+        h+='<div style="margin-top:10px;text-align:center"><button onclick="projNextQuestion()" style="padding:8px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:.5px">▶ Next Question</button></div>';
+      } else {
+        h+='<div style="margin-top:10px;text-align:center;font-family:Space Mono,monospace;font-size:11px;color:var(--gold);letter-spacing:1px">🏁 Quiz Complete!</div>';
+      }
+    }
   }
+
   h+='</div></div>';
-
   el.innerHTML=h;
-
-  // Attach camera stream
-  const vid=el.querySelector('#proj-vid-main');
-  if(vid){
-    attachStream(vid, tp.name);
-    vid.onplaying=()=>{
-      const ph=el.querySelector('#proj-vid-ph');
-      if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
-    };
-  }
+  _attachMedia('proj-vid-main', tp.name);
 }
 
 // ── MULTIPLAYER projection ──
-// Layout: 4 equal video quadrants | name top of each | score bottom-right of each | NO questions/ladder
+// 4 quadrants | bonus round overlay when S.mpBonus is active
 function _renderProjMulti(el, qd){
   const shown=S.players.slice(0,4);
   let h='';
@@ -1564,9 +2142,8 @@ function _renderProjMulti(el, qd){
     const bdr=i===0?'2px solid rgba(245,200,66,.4)':'1px solid rgba(255,255,255,.08)';
     h+='<div style="position:relative;overflow:hidden;border:'+bdr+'">';
 
-    // Video background
-    h+='<video id="proj-vid-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted '
-      +'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000"></video>';
+    // Video/canvas background
+    h+=_mediaEl('proj-vid-'+i, p.name);
 
     // Emoji placeholder
     const bg=['#12122a,#0a0a1a','#1a1228,#0d0d20','#0a1a12,#0a1209','#1a120a,#120a00'][i]||'#12122a,#0a0a1a';
@@ -1578,11 +2155,11 @@ function _renderProjMulti(el, qd){
     // LIVE badge — top left
     h+='<div style="position:absolute;top:10px;left:10px;z-index:30;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 9px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;letter-spacing:.5px">● LIVE</div>';
 
-    // Player name — top center/right
+    // Player name — top centre
     h+='<div style="position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:30;background:rgba(0,0,0,.75);border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:5px 16px;backdrop-filter:blur(8px);white-space:nowrap">';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(16px,1.8vw,24px);color:#fff;letter-spacing:1px;line-height:1">'+x(p.name)+'</div></div>';
 
-    // Score — bottom right, large + admin controls
+    // Score — bottom right + admin +/−
     h+='<div style="position:absolute;bottom:14px;right:14px;z-index:30;display:flex;align-items:center;gap:8px">';
     if(S.ain){
       h+='<button onclick="adjScore('+i+',-10)" style="width:36px;height:36px;border-radius:9px;border:2px solid rgba(231,76,60,.6);background:rgba(231,76,60,.28);color:#fff;font-size:20px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)">−</button>';
@@ -1595,6 +2172,11 @@ function _renderProjMulti(el, qd){
     }
     h+='</div>';
 
+    // Bonus badge in top-right of each quadrant when bonus is live
+    if(S.mpBonus){
+      h+='<div style="position:absolute;top:10px;right:10px;z-index:35;background:rgba(245,200,66,.2);border:1px solid rgba(245,200,66,.6);border-radius:8px;padding:3px 9px;font-size:9px;font-family:Space Mono,monospace;color:var(--gold);animation:pulse 2s infinite;font-weight:700">+3 BONUS</div>';
+    }
+
     h+='</div>'; // end quadrant
   });
 
@@ -1604,26 +2186,46 @@ function _renderProjMulti(el, qd){
   }
   h+='</div>';
 
-  // Paused overlay
+  // ── Paused overlay ──
   if(S.paused){
     h+='<div style="position:absolute;inset:0;z-index:50;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)">';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(40px,7vw,90px);color:var(--warn);letter-spacing:6px;text-shadow:0 0 40px rgba(243,156,18,.5)">⏸ PAUSED</div></div>';
   }
 
-  el.innerHTML=h;
+  // ── BONUS ROUND OVERLAY — centred panel, admin awards +3 per correct guess ──
+  if(S.mpBonus && S.ain && shown.length > 0){
+    h+='<div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:60;min-width:320px;max-width:500px">';
+    h+='<div style="background:rgba(0,0,0,.94);border:2px solid rgba(245,200,66,.6);border-radius:18px;padding:16px 20px;backdrop-filter:blur(16px);box-shadow:0 8px 40px rgba(245,200,66,.15)">';
+    h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">';
+    h+='<span style="font-size:20px;animation:pulse 2s infinite">🎁</span>';
+    h+='<div><div style="font-family:Bebas Neue,cursive;font-size:18px;color:var(--gold);letter-spacing:2px;line-height:1">BONUS ROUND</div>';
+    h+='<div style="font-size:11px;color:rgba(255,255,255,.45);margin-top:2px">Award +3 pts to any player who answers correctly</div></div>';
+    h+='<button onclick="toggleMpBonus()" title="End bonus round" style="margin-left:auto;background:rgba(231,76,60,.15);border:1px solid rgba(231,76,60,.4);border-radius:8px;color:var(--danger);font-size:12px;font-weight:700;padding:5px 12px;cursor:pointer">✕ End</button>';
+    h+='</div>';
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap">';
+    shown.forEach((p,i)=>{
+      h+='<button onclick="mpBonusAward('+i+')" style="flex:1;min-width:100px;padding:10px 8px;border-radius:12px;background:rgba(46,204,113,.12);border:1.5px solid rgba(46,204,113,.4);color:var(--safe);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:3px">'
+        +'<span style="font-size:18px">'+p.emoji+'</span>'
+        +'<span style="font-size:11px;color:#fff;font-weight:600">'+x(p.name.split(' ')[0])+'</span>'
+        +'<span style="font-size:10px;color:var(--safe);font-family:Space Mono,monospace">+3 pts</span>'
+        +'</button>';
+    });
+    h+='</div>';
+    h+='</div></div>';
+  }
 
-  // Attach streams
-  shown.forEach((p,i)=>{
-    const vid=el.querySelector('#proj-vid-'+i);
-    if(vid){
-      attachStream(vid, p.name);
-      const idx=i;
-      vid.onplaying=()=>{
-        const ph=el.querySelector('#proj-ph-'+idx);
-        if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .6s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },600); }
-      };
-    }
-  });
+  // ── Bonus round banner for spectators (non-admin) ──
+  if(S.mpBonus && !S.ain){
+    h+='<div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:60">';
+    h+='<div style="background:rgba(0,0,0,.9);border:2px solid rgba(245,200,66,.55);border-radius:14px;padding:12px 24px;backdrop-filter:blur(12px);text-align:center">';
+    h+='<div style="font-size:22px;margin-bottom:4px;animation:pulse 2s infinite">🎁</div>';
+    h+='<div style="font-family:Bebas Neue,cursive;font-size:20px;color:var(--gold);letter-spacing:3px">BONUS ROUND</div>';
+    h+='<div style="font-size:12px;color:rgba(255,255,255,.5);margin-top:3px">Guess correctly for +3 bonus points!</div>';
+    h+='</div></div>';
+  }
+
+  el.innerHTML=h;
+  shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
 }
 
 
@@ -1871,15 +2473,21 @@ function renderSession(){
     } else {
       h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:22px;text-align:center;color:var(--muted)">This quiz has no questions yet.</div>';
     }
-    // Score adjustments (if multiplayer)
+    // Score adjustments + bonus round toggle (multiplayer)
     if(S.players.length>1){
       h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px">';
-      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:12px">Manual Score Adjustments</div>';
+      h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
+      h+='<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600">Score Adjustments</div>';
+      h+='<button class="btn btn-xs '+(S.mpBonus?'btn-safe':'btn-ghost')+'" onclick="toggleMpBonus()">'+(S.mpBonus?'🎁 End Bonus':'🎁 Bonus Round')+'</button>';
+      h+='</div>';
       S.players.forEach((p,i)=>{
-        h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:9px"><div class="player-avi" style="width:30px;height:30px;font-size:14px">'+p.emoji+'</div><div style="flex:1;font-size:14px;font-weight:600">'+x(p.name)+'</div>';
+        h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+        h+='<div class="player-avi" style="width:28px;height:28px;font-size:13px">'+p.emoji+'</div>';
+        h+='<div style="flex:1;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
         h+='<button class="btn btn-xs btn-danger" onclick="adjScore('+i+',-10)">−10</button>';
-        h+='<span style="font-family:\'Space Mono\',monospace;font-size:14px;color:var(--gold);min-width:50px;text-align:center">'+(p.score||0)+' pts</span>';
+        h+='<span style="font-family:\'Space Mono\',monospace;font-size:13px;color:var(--gold);min-width:44px;text-align:center">'+(p.score||0)+'</span>';
         h+='<button class="btn btn-xs btn-safe" onclick="adjScore('+i+',10)">+10</button>';
+        if(S.mpBonus){ h+='<button style="background:rgba(245,200,66,.15);border:1px solid rgba(245,200,66,.4);color:var(--gold);border-radius:6px;padding:3px 7px;font-size:10px;font-weight:700;cursor:pointer" onclick="mpBonusAward('+i+')">+3🎁</button>'; }
         h+='</div>';
       });
       h+='</div>';
@@ -1888,26 +2496,84 @@ function renderSession(){
   document.getElementById('ap-session').innerHTML=h;
   updateFloatBar();
 }
+// ── Admin clicks an answer on the projection (single player mode) ──
+function projPickAnswer(idx){
+  if(!S.ain || !S.gon) return;
+  if(S.pickedAns !== null) return; // already picked
+  const qd = S.aq && S.aq.questions && S.aq.questions[S.curQ||0];
+  if(!qd) return;
+
+  S.pickedAns = idx;
+  const isCorrect = idx === qd.correct;
+
+  if(isCorrect){
+    // Award points equal to current ladder step
+    const pts = S.curStep || 10;
+    if(S.players[0]){
+      S.players[0].score = (S.players[0].score||0) + pts;
+      if(window._fb&&window._fb.ready())
+        window._fb.updatePlayer(S.players[0].name, { score: S.players[0].score });
+      toast('✅ Correct! +'+pts+' pts','ok');
+    }
+    // Auto-advance to next question after 2.5s
+    setTimeout(() => {
+      if(S.pickedAns === null) return; // guard against double-fire
+      projNextQuestion();
+    }, 2500);
+  } else {
+    toast('❌ Wrong answer — '+['A','B','C','D'][idx]+' selected','er');
+  }
+
+  // Push answer state to Firebase so projector tabs see it
+  if(window._fb&&window._fb.ready())
+    window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:idx });
+
+  renderProj(); updateFloatBar(); renderSession();
+}
+
+// ── Move to next question (called after correct answer or manual skip) ──
+function projNextQuestion(){
+  if(!S.gon) return;
+  const totalQ = S.aq.questions ? S.aq.questions.length : 0;
+  if(S.curQ < totalQ-1){
+    S.curQ++;
+    S.pickedAns = null;
+    S.revealAns = false;
+    S.mpBonus   = false;
+    if(S.lifelines) S.lifelines.hiddenAnswers = [];
+    const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
+    S.curStep = steps[S.curQ] || steps[steps.length-1];
+    if(window._fb&&window._fb.ready())
+      window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null, lifelines:S.lifelines, mpBonus:false });
+    renderProj(); renderSession(); updateFloatBar();
+    toast('▶ Q'+(S.curQ+1),'ok');
+  } else {
+    S.pickedAns = null;
+    toast('🏁 Quiz complete!','ok');
+    renderProj(); renderSession(); updateFloatBar();
+  }
+}
+
 function sessionNext(){
   if(!S.gon)return;
   const totalQ=S.aq.questions?S.aq.questions.length:0;
-  if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;}
+  if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;S.pickedAns=null;S.mpBonus=false;if(S.lifelines)S.lifelines.hiddenAnswers=[];}
   else{toast('Last question reached.','nf');return;}
   const steps=[150,140,130,120,110,100,90,80,70,60,50,40,30,20,10];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
-  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active' });
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null });
   renderSession();renderProj();updateFloatBar();
   toast('Moved to Q'+(S.curQ+1),'ok');
 }
 function sessionPause(){
   S.paused=!S.paused;
-  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active' });
-  renderSession();updateFloatBar();
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:S.pickedAns });
+  renderSession();renderProj();updateFloatBar();
   toast(S.paused?'Game paused.':'Game resumed.','nf');
 }
 function toggleReveal(){
   S.revealAns=!S.revealAns;
-  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, aqId:S.aq.id, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active' });
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:S.revealAns, curStep:S.curStep, status:'active', pickedAns:S.pickedAns });
   renderSession();renderProj();updateFloatBar();
   toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
@@ -1915,40 +2581,58 @@ function toggleReveal(){
 // ═══ CAMERAS ═══
 function renderCameras(){
   const n=S.players.length;
-  let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><div class="ptitle" style="margin-bottom:0">Camera Feeds</div><span class="tag tg">'+n+' Stream'+(n!==1?'s':'')+'</span></div>';
-  // Broadcast a "who is live?" ping so any open camera tabs respond immediately
-  if(_bc) _bc.postMessage({ type: 'admin-poll' });
-  h+='<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.6"><strong style="color:var(--text)">📡 How cameras work:</strong> Open the 📷 Camera tab on any device, enter the game code, pick a player and start streaming. The feed status updates here automatically.</div>';
+  if(_bc) _bc.postMessage({type:'admin-poll'});
+
+  let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
+  h+='<div class="ptitle" style="margin-bottom:0">Camera Feeds</div>';
+  h+='<span class="tag tg">'+n+' Player'+(n!==1?'s':'')+'</span></div>';
+  h+='<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.6">';
+  h+='<strong style="color:var(--text)">📡 Camera Setup:</strong> Open the 📷 Camera tab on any device, enter the game code, pick a player and stream.<br>';
+  h+='<span style="color:rgba(91,76,255,.9);font-weight:600">Same browser</span> — instant via BroadcastChannel &nbsp;|&nbsp; ';
+  h+='<span style="color:rgba(46,204,113,.9);font-weight:600">Different device</span> — automatic WebRTC peer-to-peer (no server needed).</div>';
+
   if(!n){
-    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">📹</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Camera Feeds</div><div style="font-size:14px">Feeds appear once players join an active game.</div></div>';
+    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">📹</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Players Yet</div><div style="font-size:14px">Feeds appear once players join an active game.</div></div>';
   } else {
-    h+='<p style="color:var(--muted);font-size:13px;margin-bottom:14px">Live previews from each player device. Click a card to pin it as the main projector view.</p>';
     h+='<div class="feed-grid">';
     S.players.forEach((p,i)=>{
-      const hasStream=S.streams&&S.streams[p.name];
-      h+='<div class="fcard'+(i===0?' fm':'')+'" onclick="setMain(this,\''+x(p.name)+'\')">';
+      const sentinel  = S.streams && S.streams[p.name];
+      const hasReal   = sentinel instanceof MediaStream;
+      const hasSent   = !!sentinel;
+      const answerer  = window._rtcAnswerers && window._rtcAnswerers[p.name];
+      const caller    = window._rtcCallers   && window._rtcCallers[p.name];
+      const rtcState  = answerer ? answerer.connectionState : caller ? caller.connectionState : 'none';
+      const rtcOk     = rtcState === 'connected';
+      const rtcBusy   = rtcState === 'connecting' || rtcState === 'new';
+      let badgeBg='var(--muted)', badgeText='No feed', badgeAnim='';
+      if(hasReal && rtcOk){ badgeBg='var(--safe)';   badgeText='● WebRTC Live'; badgeAnim='animation:pulse 2s infinite'; }
+      else if(hasReal)    { badgeBg='var(--danger)';  badgeText='● Live';        badgeAnim='animation:pulse 2s infinite'; }
+      else if(hasSent && rtcBusy){ badgeBg='var(--warn)'; badgeText='⟳ Connecting'; }
+      else if(hasSent)    { badgeBg='#5DADE2';        badgeText='● BC Live';     badgeAnim='animation:pulse 2s infinite'; }
+      h+='<div class="fcard'+(i===0?' fm':'')+'" onclick="setMain(this,\''+x(p.name)+'\')" style="cursor:pointer">';
       h+='<div class="fvid" style="position:relative">';
-      if(hasStream) h+='<video id="cam-prev-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;"></video>';
-      h+='<span style="z-index:2;position:relative">';
-      h+=(hasStream?'':(p.emoji));
-      h+='</span>';
+      if(hasSent) h+='<video id="cam-prev-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1"></video>';
+      h+='<span style="z-index:2;position:relative">'+(hasSent?'':p.emoji)+'</span>';
       if(i===0) h+='<span style="position:absolute;top:7px;left:7px;z-index:3;background:var(--gold);color:var(--deep);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px">MAIN</span>';
-      h+='<span style="position:absolute;top:7px;right:7px;z-index:3;background:'+(hasStream?'var(--danger)':'var(--muted)')+';color:#fff;font-size:9px;padding:2px 7px;border-radius:20px;'+(hasStream?'animation:pulse 2s infinite':'')+'">';
-      h+=(hasStream?'● LIVE':'No feed')+'</span>';
+      h+='<span style="position:absolute;top:7px;right:7px;z-index:3;background:'+badgeBg+';color:#fff;font-size:9px;padding:2px 8px;border-radius:20px;'+badgeAnim+'">'+badgeText+'</span>';
+      if(rtcState!=='none'){
+        const rc=rtcOk?'var(--safe)':rtcBusy?'var(--warn)':'var(--danger)';
+        h+='<span style="position:absolute;bottom:7px;left:7px;z-index:3;background:rgba(0,0,0,.8);color:'+rc+';font-size:8px;padding:2px 8px;border-radius:20px;font-family:Space Mono,monospace">WebRTC: '+rtcState+'</span>';
+      }
       h+='</div>';
-      h+='<div style="padding:8px 11px;font-size:13px;font-weight:600;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">'+x(p.name);
-      h+='<span style="font-family:\'Space Mono\',monospace;font-size:11px;color:var(--gold)">'+(p.score||0)+' pts</span></div>';
+      h+='<div style="padding:8px 11px;font-size:13px;font-weight:600;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">';
+      h+=x(p.name)+'<span style="font-family:\'Space Mono\',monospace;font-size:11px;color:var(--gold)">'+(p.score||0)+' pts</span></div>';
       h+='</div>';
     });
     h+='</div>';
   }
   document.getElementById('ap-cameras').innerHTML=h;
-  if(S.streams){
-    S.players.forEach((p,i)=>{
-      const vid=document.getElementById('cam-prev-'+i);
-      if(vid&&S.streams[p.name]){ vid.srcObject=S.streams[p.name]; vid.play().catch(()=>{}); }
-    });
-  }
+  S.players.forEach((p,i)=>{
+    const vid=document.getElementById('cam-prev-'+i);
+    if(!vid) return;
+    const stream=S.streams&&S.streams[p.name];
+    if(stream instanceof MediaStream){ vid.srcObject=stream; vid.play().catch(()=>{}); }
+  });
 }
 function setMain(card,name){document.querySelectorAll('.fcard').forEach(c=>c.classList.remove('fm'));card.classList.add('fm');toast(name+' set as main feed.','nf');renderCameras();}
 
