@@ -6,7 +6,6 @@
 <title>QuizStage</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <script type="module">
-// ─── FIREBASE REALTIME DATABASE ───────────────────────────────────────────
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
@@ -102,8 +101,11 @@ window._fb = {
   },
 };
 
-// Signal that Firebase is ready so the main script can subscribe
-window.dispatchEvent(new Event('fb-ready'));
+// Signal that Firebase is ready.
+// Use setTimeout(0) so the main <script> block has time to register its
+// 'fb-ready' listener before this fires (ES modules execute async).
+window._fb._ready = _fbReady;
+setTimeout(() => window.dispatchEvent(new Event('fb-ready')), 0);
 </script>
 <style>
 :root{--gold:#F5C842;--deep:#0A0A14;--panel:#10101e;--card:#16162a;--card2:#1c1c32;--accent:#5B4CFF;--accent2:#FF4C8B;--safe:#2ECC71;--danger:#E74C3C;--warn:#F39C12;--text:#E8E8F0;--muted:#6B6B88;--border:rgba(255,255,255,0.07);}
@@ -686,7 +688,10 @@ function initFirebaseSync() {
     S.revealAns= gameData.revealAns || false;
     S.curStep  = gameData.curStep || 70;
     // Re-attach the quiz object from local quizzes list
-    if (gameData.aqId) {
+    // Load quiz: prefer embedded object (works on player devices with no local quizzes)
+    if (gameData.quiz) {
+      S.aq = gameData.quiz;
+    } else if (gameData.aqId) {
       const found = S.quizzes.find(q => q.id === gameData.aqId);
       if (found) S.aq = found;
     }
@@ -731,10 +736,19 @@ function initFirebaseSync() {
   });
 }
 
-// Subscribe when FB module fires its ready event, or immediately if already fired
-window.addEventListener('fb-ready', initFirebaseSync);
-// Also try immediately in case the module already loaded synchronously
-if (window._fb && window._fb.ready()) initFirebaseSync();
+// Subscribe to fb-ready event (fired after setTimeout(0) in the module)
+window.addEventListener('fb-ready', () => {
+  if (!window._fbSyncInit) { window._fbSyncInit = true; initFirebaseSync(); }
+});
+// Belt-and-suspenders: poll every 50ms until Firebase is ready (handles edge
+// cases where the event fires before this script even parses on slow devices)
+(function pollFb(){
+  if(window._fb && window._fb.ready()){
+    if(!window._fbSyncInit){ window._fbSyncInit=true; initFirebaseSync(); }
+  } else {
+    setTimeout(pollFb, 50);
+  }
+})();
 function uid(){return 'q'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
 function mkc(){const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='QZ-';for(let i=0;i<4;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
 function x(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
@@ -877,10 +891,22 @@ function releaseGame(){
   if(!q)return;
   S.gon=true; S.gc=mkc(); S.aq=q; S.players=[];
   S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=70;
-  const gameData={ gc:S.gc, aqId:q.id, curQ:0, paused:false, revealAns:false, curStep:70, status:'active' };
-  if(window._fb&&window._fb.ready()){ window._fb.pushGame(gameData); window._fb.pushPlayers([]); }
-  renderOverview(); renderProj();
-  updateFloatBar();toast('Game live! Code: '+S.gc,'ok');
+  // Write full quiz into Firebase so player devices (which have no quiz data) can load it
+  const gameData={
+    gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:70, status:'active',
+    quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
+           difficulty:q.difficulty, desc:q.desc||'',
+           questions:q.questions||[] }
+  };
+  if(window._fb&&window._fb.ready()){
+    // Write game first, then clear players — both awaited so they don't race
+    window._fb.pushGame(gameData)
+      .then(()=>window._fb.pushPlayers([]))
+      .then(()=>{ renderOverview(); renderProj(); updateFloatBar(); toast('Game live! Code: '+S.gc,'ok'); })
+      .catch(e=>{ toast('Firebase error: '+e.message,'er'); console.error(e); });
+  } else {
+    renderOverview(); renderProj(); updateFloatBar(); toast('Game live! Code: '+S.gc,'ok');
+  }
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
@@ -1593,11 +1619,26 @@ function relFromLib(id){
   const q=S.quizzes.find(z=>z.id===id);if(!q)return;
   S.gon=true;S.gc=mkc();S.aq=q;S.players=[];
   S.curQ=0;S.paused=false;S.revealAns=false;S.curStep=70;
-  const gameData={ gc:S.gc, aqId:q.id, curQ:0, paused:false, revealAns:false, curStep:70, status:'active' };
-  if(window._fb&&window._fb.ready()){ window._fb.pushGame(gameData); window._fb.pushPlayers([]); }
-  aTab('overview',document.querySelectorAll('.anav')[0]);
-  renderProj();
-  toast('Game released! Code: '+S.gc,'ok');
+  const gameData={
+    gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:70, status:'active',
+    quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
+           difficulty:q.difficulty, desc:q.desc||'',
+           questions:q.questions||[] }
+  };
+  if(window._fb&&window._fb.ready()){
+    window._fb.pushGame(gameData)
+      .then(()=>window._fb.pushPlayers([]))
+      .then(()=>{
+        aTab('overview',document.querySelectorAll('.anav')[0]);
+        renderProj();
+        toast('Game released! Code: '+S.gc,'ok');
+      })
+      .catch(e=>{ toast('Firebase error: '+e.message,'er'); console.error(e); });
+  } else {
+    aTab('overview',document.querySelectorAll('.anav')[0]);
+    renderProj();
+    toast('Game released! Code: '+S.gc,'ok');
+  }
 }
 
 // ═══ SESSION ═══
@@ -1788,24 +1829,27 @@ function doJoin(){
 
     fb.getGame()
       .then(gameData=>{
+        console.log('[QuizStage] getGame result:', gameData);
         if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
-        if(!gameData || gameData.status!=='active'){
+        // No game in Firebase at all
+        if(!gameData){
           const el=document.getElementById('ejwrong');
-          if(el) el.textContent='❌ No active game right now. Ask your host to release one!';
+          if(el) el.textContent='❌ No active game. Ask the host to release a quiz first.';
           showE('ejwrong'); return;
         }
+        // Code mismatch
         if(code !== gameData.gc){
           const el=document.getElementById('ejwrong');
-          if(el) el.textContent='❌ Wrong code — double-check the big screen.';
+          if(el) el.textContent='❌ Wrong code — double-check the big screen. Got: '+gameData.gc;
           showE('ejwrong'); return;
         }
         _completeJoin(code, pname, gameData);
       })
       .catch(err=>{
-        console.error('Join error:', err);
+        console.error('[QuizStage] Join error:', err);
         if(btn){ btn.disabled=false; btn.textContent='🚀 Enter Lobby'; }
         const el=document.getElementById('ejwrong');
-        if(el) el.textContent='❌ Could not reach the server. Check your connection.';
+        if(el) el.textContent='❌ Could not reach Firebase. Check your connection. ('+err.message+')';
         showE('ejwrong');
       });
 
@@ -1830,7 +1874,9 @@ function _completeJoin(code, pname, gameData){
   if(gameData){
     S.gon=true; S.gc=gameData.gc; S.curQ=gameData.curQ||0;
     S.paused=gameData.paused||false; S.revealAns=gameData.revealAns||false;
-    if(gameData.aqId){ const found=S.quizzes.find(q=>q.id===gameData.aqId); if(found) S.aq=found; }
+    // Load quiz from the embedded object (player device has no local quizzes)
+    if(gameData.quiz){ S.aq=gameData.quiz; }
+    else if(gameData.aqId){ const found=S.quizzes.find(q=>q.id===gameData.aqId); if(found) S.aq=found; }
   }
 
   // Pick an emoji — base on current player count in S (will be refreshed by onPlayers listener)
@@ -1846,9 +1892,17 @@ function _completeJoin(code, pname, gameData){
 
   // ── Write to Firebase — this is what makes the player appear for the admin ──
   if(window._fb && window._fb.ready()){
+    console.log('[QuizStage] Writing player to Firebase:', pname, playerObj);
     window._fb.updatePlayer(pname, playerObj)
-      .then(()=>{ console.log('[QuizStage] Player written to Firebase:', pname); })
-      .catch(err=>{ console.error('[QuizStage] Failed to write player:', err); toast('Connection issue — try rejoining.','er'); });
+      .then(()=>{ console.log('[QuizStage] ✅ Player written successfully:', pname); })
+      .catch(err=>{
+        console.error('[QuizStage] ❌ Failed to write player:', err.code, err.message);
+        // Common cause: Firebase rules set to false — show actionable message
+        const msg = err.code==='PERMISSION_DENIED'
+          ? '❌ Firebase permission denied. Set Realtime Database rules to allow read/write.'
+          : '❌ Could not save player. Check your connection. ('+err.message+')';
+        toast(msg,'er');
+      });
   }
 
   // Unlock lobby + game tabs
