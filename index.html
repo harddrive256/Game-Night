@@ -11,7 +11,7 @@
 // Firebase Console → Project Settings → Your Apps → SDK setup → Config
 // ─────────────────────────────────────────────────────────────────────────
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, set, onValue, remove, get, push, child, onChildAdded, onChildChanged }
+import { getDatabase, ref, set, onValue, remove, get, push, child, onChildAdded }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const firebaseConfig = {
@@ -150,7 +150,13 @@ window._fb = {
   // AND fires again whenever anything changes. We track seen keys to avoid duplicates.
   webrtcOnAnyPresence: (cb) => {
     if (!_fbReady) return () => {};
-    const r=ref(_db,'quizstage/webrtc');const h=snap=>{const d=snap.val();if(d&&d.present===true)cb(snap.key);};const u1=onChildAdded(r,h),u2=onChildChanged(r,h);return()=>{try{u1();}catch(e){}try{u2();}catch(e){}};
+    return onValue(ref(_db, 'quizstage/webrtc'), snap => {
+      const val = snap.val();
+      if (!val) return;
+      Object.entries(val).forEach(([key, data]) => {
+        if (data && data.present === true) cb(key);
+      });
+    });
   },
 };
 
@@ -1210,7 +1216,6 @@ const _bc = (() => {
 // STUN = helps devices discover their public IPs so they can
 // connect directly. No video touches Google's server.
 // ════════════════════════════════════════════════════════════
-// TURN config — used by both caller and receiver
 const _STUN = {
   iceServers: [
     { urls: 'stun:stun.relay.metered.ca:80' },
@@ -1219,11 +1224,6 @@ const _STUN = {
     { urls: 'turn:global.relay.metered.ca:443',                username: 'dabaadbef02c1e3571c00dc0', credential: 'Du/dDFpmHWwV5JaW' },
     { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'dabaadbef02c1e3571c00dc0', credential: 'Du/dDFpmHWwV5JaW' },
   ]
-};
-// Receiver-side config forces relay to avoid direct connection issues on school networks
-const _STUN_RECV = {
-  iceTransportPolicy: 'relay',
-  iceServers: _STUN.iceServers
 };
 
 // Active RTCPeerConnections — keyed by playerName
@@ -1274,22 +1274,21 @@ async function rtcStartCall(stream, pname) {
       renderCameras();
     }
     if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      if (window._fb && window._fb.ready()) window._fb.webrtcClearSignalling(pname).catch(() => {});
+      console.warn('[WebRTC] Connection lost, retrying in 3s…');
       setTimeout(() => {
         if (_camCurrentStream && _camActivePlayer === pname) rtcStartCall(_camCurrentStream, pname);
       }, 3000);
     }
   };
 
-  let offer;
   try {
-    offer = await pc.createOffer();
+    const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await window._fb.webrtcSendOffer(pname, { type: offer.type, sdp: offer.sdp });
-    console.log('[WebRTC] Offer sent for', pname);
-  } catch(err) {
-    console.error('[WebRTC] Failed to create/send offer for', pname, err);
-    toast('Camera error: ' + err.message, 'er');
+    console.log('[WebRTC] ✅ Offer written to Firebase for', pname);
+  } catch(offerErr) {
+    console.error('[WebRTC] ❌ Offer failed for', pname, offerErr);
+    toast('Stream error: ' + offerErr.message, 'er');
     return;
   }
 
@@ -1351,7 +1350,7 @@ async function rtcStartReceive(pname) {
 
   console.log('[WebRTC] Receiver starting for', pname);
 
-  const pc = new RTCPeerConnection(_STUN_RECV);
+  const pc = new RTCPeerConnection(_STUN);
   window._rtcAnswerers[pname] = pc;
   let answerSent = false; // guard: only send answer once per offer
 
@@ -1375,14 +1374,7 @@ async function rtcStartReceive(pname) {
 
   pc.onconnectionstatechange = () => {
     console.log('[WebRTC] Receiver:', pc.connectionState, pname);
-    if (pc.connectionState === 'failed') {
-      if (window._fb && window._fb.ready()) window._fb.webrtcClearSignalling(pname).catch(() => {});
-      delete window._rtcAnswerers[pname];
-      answerSent = false;
-      if (S.streams && S.streams[pname] && !(S.streams[pname] instanceof MediaStream)) delete S.streams[pname];
-      renderCameras();
-    }
-    if (pc.connectionState === 'closed') {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       delete window._rtcAnswerers[pname];
       answerSent = false;
       renderCameras();
@@ -1390,11 +1382,8 @@ async function rtcStartReceive(pname) {
   };
 
   // Watch for offer — onValue handles both already-present and future offers
-  let lastOfferSdp = null;
   const unsubOffer = window._fb.webrtcOnOffer(pname, async offer => {
-    if (!offer || !offer.sdp) return;
-    if (answerSent && offer.sdp === lastOfferSdp) return;
-    if (answerSent && offer.sdp !== lastOfferSdp) { answerSent = false; }
+    if (answerSent) return; // don't re-answer same offer
     if (pc.signalingState !== 'stable') return;
     console.log('[WebRTC] Offer received for', pname);
     try {
@@ -1403,7 +1392,6 @@ async function rtcStartReceive(pname) {
       await pc.setLocalDescription(answer);
       await window._fb.webrtcSendAnswer(pname, { type: answer.type, sdp: answer.sdp });
       answerSent = true;
-      lastOfferSdp = offer.sdp;
       console.log('[WebRTC] Answer sent for', pname);
     } catch(err) {
       console.warn('[WebRTC] Offer handling error:', err);
@@ -2421,22 +2409,8 @@ function _renderProjMulti(el, qd){
   shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
   if(typeof isFast==='function'&&isFast()&&S.buzzed){
     const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');
-    shown.forEach((p,i)=>{
-      if(!grid||!grid.children[i]) return;
-      if(p.name===S.buzzed){
-        grid.children[i].classList.add('fast-winner-quad');
-        const b=document.createElement('div');
-        b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';
-        b.textContent='BUZZED IN';
-        grid.children[i].appendChild(b);
-      }
-    });
-    if(S.ain){
-      const nb=document.createElement('div');
-      nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';
-      nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';
-      el.appendChild(nb);
-    }
+    shown.forEach((p,i)=>{ if(!grid||!grid.children[i]) return; if(p.name===S.buzzed){ grid.children[i].classList.add('fast-winner-quad'); const b=document.createElement('div'); b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700'; b.textContent='BUZZED IN'; grid.children[i].appendChild(b); } });
+    if(S.ain){ const nb=document.createElement('div'); nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60'; nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>'; el.appendChild(nb); }
   }
 }
 
@@ -2966,22 +2940,14 @@ function doBuzz(){
   S.buzzed=S.me; renderFastPlayerScreen(); renderProj();
   window._fb.buzzIn(S.me).catch(e=>{toast('Buzz failed','er');S.buzzed=null;renderFastPlayerScreen();});
   try{if(navigator.vibrate)navigator.vibrate([80,40,80]);}catch(e){}
-  try{const ctx=new(window.AudioContext||window.webkitAudioContext)();
-    const o=ctx.createOscillator(),g=ctx.createGain();
-    o.connect(g);g.connect(ctx.destination);
-    o.frequency.setValueAtTime(920,ctx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(460,ctx.currentTime+0.18);
-    g.gain.setValueAtTime(0.35,ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.35);
-    o.start();o.stop(ctx.currentTime+0.35);}catch(e){}
+  try{const ctx=new(window.AudioContext||window.webkitAudioContext)();const o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.setValueAtTime(920,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(460,ctx.currentTime+0.18);g.gain.setValueAtTime(0.35,ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.35);o.start();o.stop(ctx.currentTime+0.35);}catch(e){}
 }
 function fastNextQuestion(){
   if(!S.ain) return;
   S.buzzed=null;S.pickedAns=null;S.revealAns=false;
   const total=S.aq&&S.aq.questions?S.aq.questions.length:0;
   if((S.curQ||0)<total-1) S.curQ=(S.curQ||0)+1; else toast('Quiz complete!','ok');
-  if(window._fb&&window._fb.ready())
-    window._fb.pushGame({gc:S.gc,quiz:S.aq,curQ:S.curQ,paused:S.paused,revealAns:false,curStep:S.curStep,status:'active',pickedAns:null,lifelines:S.lifelines,mpBonus:S.mpBonus,gameOver:false,buzzed:null});
+  if(window._fb&&window._fb.ready()) window._fb.pushGame({gc:S.gc,quiz:S.aq,curQ:S.curQ,paused:S.paused,revealAns:false,curStep:S.curStep,status:'active',pickedAns:null,lifelines:S.lifelines,mpBonus:S.mpBonus,gameOver:false,buzzed:null});
   renderProj();renderSession();updateFloatBar();
 }
 function renderScores(){
