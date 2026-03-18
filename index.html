@@ -11,7 +11,7 @@
 // Firebase Console → Project Settings → Your Apps → SDK setup → Config
 // ─────────────────────────────────────────────────────────────────────────
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, set, onValue, remove, get, push, child, onChildAdded, onChildChanged }
+import { getDatabase, ref, set, onValue, remove, get, push, child, onChildAdded }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const firebaseConfig = {
@@ -126,9 +126,6 @@ window._fb = {
   webrtcClear: (player) =>
     _fbReady ? remove(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player))) : Promise.resolve(),
 
-  webrtcClearAll: () =>
-    _fbReady ? remove(ref(_db, 'quizstage/webrtc')) : Promise.resolve(),
-
   // Clear only the signalling data (offer/answer/candidates), preserve presence flag
   webrtcClearSignalling: (player) => {
     if (!_fbReady) return Promise.resolve();
@@ -153,11 +150,13 @@ window._fb = {
   // AND fires again whenever anything changes. We track seen keys to avoid duplicates.
   webrtcOnAnyPresence: (cb) => {
     if (!_fbReady) return () => {};
-    const r = ref(_db, 'quizstage/webrtc');
-    const handle = snap => { const d = snap.val(); if (d && d.present === true) cb(snap.key); };
-    const u1 = onChildAdded(r, handle);
-    const u2 = onChildChanged(r, handle);
-    return () => { try{u1();}catch(e){} try{u2();}catch(e){} };
+    return onValue(ref(_db, 'quizstage/webrtc'), snap => {
+      const val = snap.val();
+      if (!val) return;
+      Object.entries(val).forEach(([key, data]) => {
+        if (data && data.present === true) cb(key);
+      });
+    });
   },
 };
 
@@ -1046,7 +1045,7 @@ function releaseGame(){
            submode:q.submode||'default', questions:q.questions||[] }
   };
   if(window._fb&&window._fb.ready()){
-    window._fb.webrtcClearAll().catch(()=>{});
+    remove(ref(_db,'quizstage/webrtc')).catch(()=>{});
     window._fb.pushGame(gameData)
       .then(()=>window._fb.pushPlayers([]))
       .then(()=>{ renderOverview(); renderProj(); updateFloatBar(); toast('Game live! Code: '+S.gc,'ok'); })
@@ -1064,7 +1063,6 @@ function launchProjection(){
       mpBonus:S.mpBonus, gameOver:S.gameOver, launched:true, buzzed:S.buzzed||null });
   }
   go('projector');
-  rtcWatchForCameras();
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
@@ -1081,7 +1079,7 @@ function endGame(){
     window._fb.pushGame(null);
     window._fb.pushPlayers([]);
     // Clear WebRTC presence so streaming devices reset
-    window._fb.webrtcClearAll().catch(()=>{});
+    remove(ref(_db,'quizstage/webrtc')).catch(()=>{});
   }
   renderOverview(); renderProj(); renderSession();
   updateFloatBar();toast('Session ended.','nf');
@@ -1383,20 +1381,10 @@ async function rtcStartReceive(pname) {
     const stream = e.streams && e.streams[0];
     if (!stream) return;
     console.log('[WebRTC] ✅ Track received for', pname);
-    // Save the real MediaStream so _attachMedia can wire it on future renders
+    // Save stream first — renderProj will call _attachMedia which reads S.streams
     S.streams[pname] = stream;
-    // Wire to any already-rendered video elements for this player right now
-    S.streams[pname] = stream;
-    renderProj(); renderCameras();
-    setTimeout(()=>{
-      document.querySelectorAll('video[data-player]').forEach(v=>{
-        if(v.getAttribute('data-player')!==pname) return;
-        v.srcObject=stream; v.play().catch(()=>{});
-        const phId=v.id==='proj-vid-main'?'proj-vid-ph':v.id.replace('proj-vid-','proj-ph-');
-        const ph=document.getElementById(phId);
-        if(ph){ph.style.opacity='0';ph.style.display='none';}
-      });
-    },60);
+    renderProj();
+    renderCameras();
     if(S.ain) toast('📹 '+x(pname)+' live','ok');
   };
 
@@ -1478,8 +1466,13 @@ function rtcWatchForCameras() {
   if (!window._fb || !window._fb.ready()) return;
   console.log('[WebRTC] Watching Firebase for camera presence…');
 
+  // Track keys we have already started receiving for — prevents duplicate PCs
+  // when onValue fires multiple times (it fires on every DB change)
+  if (!window._rtcPresenceSeen) window._rtcPresenceSeen = new Set();
+
   window._fb.webrtcOnAnyPresence(sanitisedKey => {
-    if (window._rtcCallers && (window._rtcCallers[sanitisedKey] ||
+    // If we own this stream (caller tab) — skip
+    if (window._rtcCallers && (window._rtcCallers[sanitisedKey] || 
         S.players.find(p => window._rtcCallers[p.name] && sanitisePlayerKey(p.name) === sanitisedKey))) return;
 
     // Already have a live/connecting connection — skip
@@ -2044,15 +2037,17 @@ function _attachMedia(id, pname){
   const stream = S.streams[pname];
 
   if(stream instanceof MediaStream){
-    // Real MediaStream — wire srcObject directly (same-tab local or WebRTC remote)
     if(el.tagName === 'VIDEO'){
+      // Set onplaying BEFORE srcObject so we don't miss the event
+      el.onplaying = () => {
+        const phId = id==='proj-vid-main' ? 'proj-vid-ph' : id.replace('proj-vid-','proj-ph-');
+        const ph = document.getElementById(phId);
+        if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .5s'; setTimeout(()=>{ if(ph) ph.style.display='none'; }, 500); }
+      };
       el.srcObject = stream;
       el.play().catch(()=>{});
-      el.onplaying=()=>{
-      const phId=id==='proj-vid-main'?'proj-vid-ph':id.replace('proj-vid-','proj-ph-');
-      const ph=document.getElementById(phId);
-      if(ph){ph.style.opacity='0';ph.style.transition='opacity .5s';setTimeout(()=>{if(ph)ph.style.display='none';},500);}
-    };
+      // If already playing, hide placeholder immediately
+      if(stream.active) el.onplaying();
     }
   } else if(stream === 'remote'){
     // WebRTC handshake in progress — stream will arrive via ontrack and be wired
@@ -2674,7 +2669,7 @@ function relFromLib(id){
            submode:q.submode||'default', questions:q.questions||[] }
   };
   if(window._fb&&window._fb.ready()){
-    window._fb.webrtcClearAll().catch(()=>{});
+    remove(ref(_db,'quizstage/webrtc')).catch(()=>{});
     window._fb.pushGame(gameData)
       .then(()=>window._fb.pushPlayers([]))
       .then(()=>{
