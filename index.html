@@ -1045,6 +1045,7 @@ function releaseGame(){
            submode:q.submode||'default', questions:q.questions||[] }
   };
   if(window._fb&&window._fb.ready()){
+    window._fb.webrtcClearAll().catch(()=>{});
     window._fb.pushGame(gameData)
       .then(()=>window._fb.pushPlayers([]))
       .then(()=>{ renderOverview(); renderProj(); updateFloatBar(); toast('Game live! Code: '+S.gc,'ok'); })
@@ -1380,8 +1381,23 @@ async function rtcStartReceive(pname) {
     const stream = e.streams && e.streams[0];
     if (!stream) return;
     console.log('[WebRTC] ✅ Track received for', pname);
+    // Save stream to S.streams so future renderProj() calls wire it via _attachMedia
     S.streams[pname] = stream;
-    renderProj();
+    // Wire directly to any existing video elements WITHOUT rebuilding the DOM
+    // This prevents destroying other players' live video elements
+    let wired = false;
+    document.querySelectorAll('video[data-player]').forEach(v => {
+      if (v.getAttribute('data-player') !== pname) return;
+      v.srcObject = stream;
+      v.play().catch(() => {});
+      // Hide placeholder
+      const phId = v.id === 'proj-vid-main' ? 'proj-vid-ph' : v.id.replace('proj-vid-', 'proj-ph-');
+      const ph = document.getElementById(phId);
+      if (ph) { ph.style.opacity = '0'; ph.style.transition = 'opacity .5s'; setTimeout(() => { if(ph) ph.style.display='none'; }, 500); }
+      wired = true;
+    });
+    // If no video element found (projection not open yet), renderProj will wire it later
+    if (!wired) console.log('[WebRTC] No video element found for', pname, '— will wire on next renderProj');
     renderCameras();
     if(S.ain) toast('📹 '+x(pname)+' live','ok');
   };
@@ -2660,6 +2676,7 @@ function relFromLib(id){
            submode:q.submode||'default', questions:q.questions||[] }
   };
   if(window._fb&&window._fb.ready()){
+    window._fb.webrtcClearAll().catch(()=>{});
     window._fb.pushGame(gameData)
       .then(()=>window._fb.pushPlayers([]))
       .then(()=>{
