@@ -1045,7 +1045,6 @@ function releaseGame(){
            submode:q.submode||'default', questions:q.questions||[] }
   };
   if(window._fb&&window._fb.ready()){
-    window._fb.webrtcClearAll().catch(()=>{});
     window._fb.pushGame(gameData)
       .then(()=>window._fb.pushPlayers([]))
       .then(()=>{ renderOverview(); renderProj(); updateFloatBar(); toast('Game live! Code: '+S.gc,'ok'); })
@@ -2661,7 +2660,6 @@ function relFromLib(id){
            submode:q.submode||'default', questions:q.questions||[] }
   };
   if(window._fb&&window._fb.ready()){
-    window._fb.webrtcClearAll().catch(()=>{});
     window._fb.pushGame(gameData)
       .then(()=>window._fb.pushPlayers([]))
       .then(()=>{
