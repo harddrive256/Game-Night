@@ -386,7 +386,7 @@ video{background:#000;}
 .buzz-btn.locked{background:radial-gradient(circle at 35% 35%,#555,#333);animation:none;opacity:.4;cursor:not-allowed;}
 .buzz-btn.winner{background:radial-gradient(circle at 35% 35%,#27ae60,#1a7a45);animation:none;}
 @keyframes buzzpulse{0%{box-shadow:0 0 0 0 rgba(231,76,60,.55);}70%{box-shadow:0 0 0 30px rgba(231,76,60,0);}100%{box-shadow:0 0 0 0 rgba(231,76,60,0);}}
-@keyframes gf{0%,100%{outline:4px solid rgba(46,204,113,0);}50%{outline:5px solid rgba(46,204,113,.9);}}
+@keyframes gf{0%,100%{outline:6px solid rgba(46,204,113,0);outline-offset:0px;}50%{outline:8px solid rgba(46,204,113,1);outline-offset:-2px;}}
 .fast-winner-quad{animation:gf .5s ease-in-out infinite;}
 </style>
 </head>
@@ -1381,23 +1381,8 @@ async function rtcStartReceive(pname) {
     const stream = e.streams && e.streams[0];
     if (!stream) return;
     console.log('[WebRTC] ✅ Track received for', pname);
-    // Save stream to S.streams so future renderProj() calls wire it via _attachMedia
     S.streams[pname] = stream;
-    // Wire directly to any existing video elements WITHOUT rebuilding the DOM
-    // This prevents destroying other players' live video elements
-    let wired = false;
-    document.querySelectorAll('video[data-player]').forEach(v => {
-      if (v.getAttribute('data-player') !== pname) return;
-      v.srcObject = stream;
-      v.play().catch(() => {});
-      // Hide placeholder
-      const phId = v.id === 'proj-vid-main' ? 'proj-vid-ph' : v.id.replace('proj-vid-', 'proj-ph-');
-      const ph = document.getElementById(phId);
-      if (ph) { ph.style.opacity = '0'; ph.style.transition = 'opacity .5s'; setTimeout(() => { if(ph) ph.style.display='none'; }, 500); }
-      wired = true;
-    });
-    // If no video element found (projection not open yet), renderProj will wire it later
-    if (!wired) console.log('[WebRTC] No video element found for', pname, '— will wire on next renderProj');
+    renderProj();
     renderCameras();
     if(S.ain) toast('📹 '+x(pname)+' live','ok');
   };
@@ -1881,8 +1866,8 @@ async function startCamStream(){
   const constraints = {
     audio: false,
     video: deviceId
-      ? { deviceId: { exact: deviceId }, width:{ideal:1920}, height:{ideal:1080} }
-      : { facingMode:{ ideal:_camFace }, width:{ideal:1920}, height:{ideal:1080} }
+      ? { deviceId: { exact: deviceId }, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30} }
+      : { facingMode:{ ideal:_camFace }, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30} }
   };
 
   try{
@@ -2054,7 +2039,10 @@ function _attachMedia(id, pname){
       };
       el.srcObject = stream;
       el.play().catch(()=>{});
-      if(stream.active) el.onplaying();
+      // Always hide placeholder when we have a real stream
+      const phIdNow = id==='proj-vid-main' ? 'proj-vid-ph' : id.replace('proj-vid-','proj-ph-');
+      const phNow = document.getElementById(phIdNow);
+      if(phNow) { phNow.style.opacity='0'; phNow.style.transition='opacity .5s'; setTimeout(()=>{ if(phNow) phNow.style.display='none'; },500); }
     }
   } else if(stream === 'remote'){
     // WebRTC handshake in progress — stream will arrive via ontrack and be wired
@@ -2360,6 +2348,15 @@ function _renderProjSingle(el, qd){
   h+='</div></div>';
   el.innerHTML=h;
   _attachMedia('proj-vid-main', tp.name);
+  // Re-wire any other streams that may exist
+  document.querySelectorAll('video[data-player]').forEach(v => {
+    const pn = v.getAttribute('data-player');
+    const st = S.streams && S.streams[pn];
+    if (st instanceof MediaStream && !v.srcObject) {
+      v.srcObject = st;
+      v.play().catch(() => {});
+    }
+  });
 }
 
 // ── MULTIPLAYER projection ──
@@ -2463,6 +2460,15 @@ function _renderProjMulti(el, qd){
 
   el.innerHTML=h;
   shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
+  // Re-wire any streams not caught by _attachMedia (e.g. timing issues)
+  document.querySelectorAll('video[data-player]').forEach(v => {
+    const pn = v.getAttribute('data-player');
+    const st = S.streams && S.streams[pn];
+    if (st instanceof MediaStream && !v.srcObject) {
+      v.srcObject = st;
+      v.play().catch(() => {});
+    }
+  });
   if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
 }
 
