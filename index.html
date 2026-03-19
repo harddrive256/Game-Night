@@ -388,6 +388,68 @@ video{background:#000;}
 @keyframes buzzpulse{0%{box-shadow:0 0 0 0 rgba(231,76,60,.55);}70%{box-shadow:0 0 0 30px rgba(231,76,60,0);}100%{box-shadow:0 0 0 0 rgba(231,76,60,0);}}
 @keyframes gf{0%,100%{outline:4px solid rgba(46,204,113,0);}50%{outline:5px solid rgba(46,204,113,.9);}}
 .fast-winner-quad{animation:gf .5s ease-in-out infinite;}
+
+/* ═══════════════════════════════════════════════════
+   TABLET / SMALL LAPTOP — 768px to 1200px
+   Target: iPad, Surface, smaller notebooks
+═══════════════════════════════════════════════════ */
+
+/* Prevent any horizontal overflow globally */
+html { overflow-x: hidden; }
+body { overflow-x: hidden; min-width: 0; }
+
+/* Nav: allow tabs to wrap on smaller screens */
+.nav-tabs { gap: 2px; }
+.nav-tab   { padding: 6px 10px; font-size: 12px; }
+
+/* Sidebar: narrower on small laptops/tablets */
+@media (max-width: 1100px) {
+  .admin-layout { grid-template-columns: 180px 1fr; }
+}
+@media (max-width: 860px) {
+  .admin-layout { grid-template-columns: 150px 1fr; }
+  .admin-sidebar { padding: 10px 6px; }
+  .anav { font-size: 12px; padding: 8px 9px; gap: 7px; }
+  .acont { padding: 16px 14px; }
+}
+
+/* Stat cards: 2×2 grid on narrow tablets */
+@media (max-width: 860px) {
+  .scards { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Feed grid: 2 cols on tablets */
+@media (max-width: 900px) {
+  .feed-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Game layout: shrink side columns on tablets */
+@media (max-width: 1000px) {
+  .game-layout { grid-template-columns: 150px 1fr 150px; padding: 10px; gap: 8px; }
+}
+@media (max-width: 800px) {
+  .game-layout { grid-template-columns: 130px 1fr 130px; padding: 8px; gap: 6px; }
+}
+
+/* Admin float bar: keep it on-screen on all tablet sizes */
+#admin-float-bar {
+  max-width: calc(100vw - 36px);
+  right: 12px;
+  bottom: 12px;
+}
+
+/* Modal: full comfort on all sizes */
+@media (max-width: 900px) {
+  .modal-lg { max-width: 96vw; }
+  .modal    { max-width: 96vw; }
+}
+
+/* Lobby card doesn't overflow */
+.lcard { max-width: 100%; }
+
+/* Overflow protection on admin content sections */
+.acont { overflow-x: hidden; }
+.apage { overflow-x: hidden; }
 </style>
 </head>
 <body>
@@ -2206,7 +2268,7 @@ function _renderProjSingle(el, qd){
   const sf=[50,100];
   const currentScore = tp.score||0;
   const displaySteps=[...ladderSteps].reverse(); // top of DOM = highest value
-  h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:200px;z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
   h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
   h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 6px 4px">';
   displaySteps.forEach(v=>{
@@ -2233,7 +2295,7 @@ function _renderProjSingle(el, qd){
   h+='</div></div>';
 
   // ── BOTTOM: Question card (left of ladder) ──
-  h+='<div style="position:absolute;bottom:14px;left:14px;right:216px;z-index:20">';
+  h+='<div style="position:absolute;bottom:14px;left:14px;right:max(216px,calc(18vw + 16px));z-index:20">';
   h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:16px;padding:14px 18px;backdrop-filter:blur(14px)">';
 
   // Quiz title bar
@@ -3258,7 +3320,7 @@ function renderSinglePlayerView(){
   const sf = [50,100];
   const displaySteps = [...ladderSteps].reverse();
 
-  let h = '<div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f,#0d0c1e);display:flex;gap:0;overflow:hidden">';
+  let h = '<div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f,#0d0c1e);display:flex;gap:0;overflow-y:auto;overflow-x:hidden">';
 
   // LEFT: Question + answers
   h += '<div style="flex:1;display:flex;flex-direction:column;padding:20px 16px 20px 20px;gap:14px;overflow-y:auto">';
@@ -3327,7 +3389,7 @@ function renderSinglePlayerView(){
   h += '</div>';
 
   // RIGHT: Ladder
-  h += '<div style="width:130px;flex-shrink:0;background:rgba(0,0,0,.6);border-left:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;overflow:hidden">';
+  h += '<div style="width:min(130px,18vw);flex-shrink:0;background:rgba(0,0,0,.6);border-left:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;overflow:hidden">';
   h += '<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:8px 0 6px;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
   h += '<div style="flex:1;display:flex;flex-direction:column;padding:3px 5px 4px;overflow:hidden">';
   displaySteps.forEach(v => {
