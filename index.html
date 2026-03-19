@@ -85,9 +85,79 @@ window._fb = {
   onGame:    (cb) => { if (!_fbReady) return ()=>{}; return onValue(_gameRef,    snap => cb(snap.val())); },
   onPlayers: (cb) => { if (!_fbReady) return ()=>{}; return onValue(_playersRef, snap => { const v=snap.val(); cb(v ? Object.values(v) : []); }); },
 
-  // USB camera system — Firebase no longer used for video streaming
+  // ── WebRTC signalling via Firebase ──
+  // Path per player: quizstage/webrtc/{sanitisedName}/
+  //   present: true/null  — camera-is-live flag
+  //   offer:   {type,sdp} — SDP offer from camera tab
+  //   answer:  {type,sdp} — SDP answer from receiver
+  //   offerCandidates/{id}: ICE from camera tab
+  //   answerCandidates/{id}: ICE from receiver
+
+  _wref: (player) => ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)),
+
+  webrtcSendOffer: (player, offer) =>
+    _fbReady ? set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer'), offer) : Promise.resolve(),
+
+  webrtcSendAnswer: (player, answer) =>
+    _fbReady ? set(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer'), answer) : Promise.resolve(),
+
+  webrtcAddCandidate: (player, side, cand) =>
+    _fbReady ? push(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side), cand) : Promise.resolve(),
+
+  // One-shot listener: resolves when offer appears (handles already-present offers)
+  webrtcOnOffer: (player, cb) => {
+    if (!_fbReady) return () => {};
+    const r = child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'offer');
+    return onValue(r, snap => { const v = snap.val(); if (v && v.sdp) cb(v); });
+  },
+
+  webrtcOnAnswer: (player, cb) => {
+    if (!_fbReady) return () => {};
+    const r = child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), 'answer');
+    return onValue(r, snap => { const v = snap.val(); if (v && v.sdp) cb(v); });
+  },
+
+  webrtcOnCandidates: (player, side, cb) => {
+    if (!_fbReady) return () => {};
+    return onChildAdded(child(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player)), side),
+      snap => { const v = snap.val(); if (v) cb(v); });
+  },
+
+  webrtcClear: (player) =>
+    _fbReady ? remove(ref(_db, 'quizstage/webrtc/' + sanitiseKey(player))) : Promise.resolve(),
   webrtcClearAll: () =>
     _fbReady ? remove(ref(_db, 'quizstage/webrtc')) : Promise.resolve(),
+
+  // Clear only the signalling data (offer/answer/candidates), preserve presence flag
+  webrtcClearSignalling: (player) => {
+    if (!_fbReady) return Promise.resolve();
+    const base = 'quizstage/webrtc/' + sanitiseKey(player);
+    return Promise.all([
+      remove(ref(_db, base + '/offer')),
+      remove(ref(_db, base + '/answer')),
+      remove(ref(_db, base + '/offerCandidates')),
+      remove(ref(_db, base + '/answerCandidates')),
+    ]);
+  },
+
+  // Presence flag — written by camera tab when streaming starts
+  webrtcSetPresence: (player, live) => {
+    if (!_fbReady) return Promise.resolve();
+    const r = ref(_db, 'quizstage/webrtc/' + sanitiseKey(player) + '/present');
+    return live ? set(r, true) : remove(r);
+  },
+
+  // Watch for cameras going live: fires cb(sanitisedKey) when present===true.
+  // Uses onValue so it fires immediately with ALL existing data (handles page refresh)
+  // AND fires again whenever anything changes. We track seen keys to avoid duplicates.
+  webrtcOnAnyPresence: (cb) => {
+    if (!_fbReady) return () => {};
+    const r = ref(_db, 'quizstage/webrtc');
+    const handle = snap => { const d = snap.val(); if (d && d.present === true) cb(snap.key); };
+    const u1 = onChildAdded(r, handle);
+    const u2 = onChildChanged(r, handle);
+    return () => { try{u1();}catch(e){} try{u2();}catch(e){} };
+  },
 };
 
 // Fire fb-ready after a tick so the main <script> listener is registered first
@@ -352,6 +422,7 @@ video{background:#000;}
     <button class="nav-tab" id="tlobby" onclick="go('lobby')" disabled>⏳ Lobby</button>
     <button class="nav-tab" id="tgame" onclick="go('game')" disabled>⚡ Gameplay</button>
     <button class="nav-tab" onclick="go('projector')">📺 Projector</button>
+    <button class="nav-tab" onclick="go('camera')">📷 Camera</button>
     <button class="nav-tab" onclick="adminEntry()">⚙️ Admin</button>
   </div>
   <div id="achip" style="display:none;align-items:center;gap:9px;">
@@ -518,6 +589,105 @@ video{background:#000;}
   <div id="proj" style="position:relative;width:100%;height:calc(100vh - 58px);background:#000;overflow:hidden"></div>
 </div>
 
+<!-- CAMERA DEVICE SCREEN -->
+<div id="screen-camera" class="screen">
+  <div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f 0%,#0d0c1e 100%);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;position:relative;overflow:hidden">
+
+    <!-- subtle grid bg -->
+    <div style="position:absolute;inset:0;background-image:linear-gradient(rgba(91,76,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(91,76,255,.04) 1px,transparent 1px);background-size:44px 44px;pointer-events:none"></div>
+
+    <!-- ── STEP 1: Enter game code ── -->
+    <div id="cam-step-code" style="text-align:center;max-width:460px;width:100%;position:relative">
+      <div style="font-size:52px;margin-bottom:14px">📹</div>
+      <div style="font-family:'Bebas Neue',cursive;font-size:40px;letter-spacing:3px;color:var(--gold);margin-bottom:6px">Camera Device</div>
+      <div style="font-size:14px;color:rgba(255,255,255,.45);line-height:1.7;margin-bottom:28px">
+        Open this page on a <strong style="color:rgba(255,255,255,.8)">separate phone, tablet, or laptop</strong>
+        that will be pointed at the contestant — not the device they're playing on.
+      </div>
+
+      <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:26px;text-align:left;margin-bottom:18px">
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:10px;display:block">Game Code</label>
+        <input id="cam-code-input" class="ifield" maxlength="8" placeholder="QZ-XXXX"
+          oninput="this.value=this.value.toUpperCase()"
+          onkeydown="if(event.key==='Enter')camLoadPlayers()"
+          style="font-family:'Space Mono',monospace;font-size:22px;letter-spacing:6px;text-align:center;text-transform:uppercase;padding:13px;margin-bottom:4px">
+        <div id="cam-code-err" style="display:none;font-size:12px;color:var(--danger);margin-top:6px;padding:7px 10px;background:rgba(231,76,60,.08);border-radius:8px;border:1px solid rgba(231,76,60,.2)"></div>
+      </div>
+
+      <button class="btn btn-primary btn-block" style="font-size:15px;padding:14px;border-radius:13px;margin-bottom:10px" onclick="camLoadPlayers()">🔍 Load Player List</button>
+      <p style="font-size:12px;color:rgba(255,255,255,.2);line-height:1.6">Enter the code shown on the projector screen to see who's playing.</p>
+    </div>
+
+    <!-- ── STEP 2: Pick player + camera settings ── -->
+    <div id="cam-step-setup" style="display:none;text-align:center;max-width:460px;width:100%;position:relative">
+
+      <!-- Back button -->
+      <button onclick="camGoBack()" style="display:inline-flex;align-items:center;gap:6px;background:transparent;border:none;color:rgba(255,255,255,.4);font-size:13px;font-family:'DM Sans',sans-serif;cursor:pointer;margin-bottom:20px;padding:0">
+        ← Back
+      </button>
+
+      <div style="font-family:'Bebas Neue',cursive;font-size:32px;letter-spacing:2px;color:var(--gold);margin-bottom:6px">Set Up Camera</div>
+      <div id="cam-setup-gamecode" style="font-family:'Space Mono',monospace;font-size:12px;color:rgba(245,200,66,.5);letter-spacing:3px;margin-bottom:24px"></div>
+
+      <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);border-radius:18px;padding:26px;text-align:left;margin-bottom:16px">
+
+        <!-- Player selector -->
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:10px;display:block">Who is this camera filming?</label>
+        <div id="cam-player-cards" style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:18px"></div>
+
+        <!-- Manual name fallback -->
+        <div id="cam-manual-wrap" style="margin-bottom:18px">
+          <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:8px;display:block">Or enter a name manually</label>
+          <input id="cam-manual-input" class="ifield" placeholder="Contestant name…" style="font-size:15px;padding:11px 14px">
+        </div>
+
+        <!-- Camera source selector -->
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-bottom:10px;display:block">Camera source</label>
+        <div style="display:flex;gap:8px;margin-bottom:6px">
+          <button id="cam-face-user" class="btn btn-sm" onclick="setCamFace('user')" style="flex:1;justify-content:center">🤳 Front</button>
+          <button id="cam-face-env" class="btn btn-sm" onclick="setCamFace('environment')" style="flex:1;justify-content:center">📷 Back</button>
+        </div>
+
+        <!-- Device selector — populated once getUserMedia runs an enumeration -->
+        <label style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;font-weight:600;margin-top:14px;margin-bottom:8px;display:block">Specific camera device</label>
+        <select id="cam-device-sel" style="width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:11px;padding:11px 14px;color:rgba(255,255,255,.75);font-family:'DM Sans',sans-serif;font-size:13px;cursor:pointer">
+          <option value="">— Auto (use facing mode above) —</option>
+        </select>
+        <button onclick="camEnumerateDevices()" style="margin-top:7px;width:100%;padding:8px;background:transparent;border:1px dashed rgba(255,255,255,.15);border-radius:9px;color:rgba(255,255,255,.4);font-size:12px;font-family:'DM Sans',sans-serif;cursor:pointer">🔄 Detect available cameras</button>
+      </div>
+
+      <div id="cam-idle-err" style="display:none;background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);border-radius:10px;padding:10px 14px;font-size:13px;color:var(--danger);margin-bottom:14px"></div>
+      <button class="btn btn-gold btn-block" style="font-size:16px;padding:15px;border-radius:14px" onclick="startCamStream()">▶ Start Streaming</button>
+      <p style="font-size:12px;color:rgba(255,255,255,.2);margin-top:12px;line-height:1.6">Keep this screen open and the device plugged in during the game.</p>
+    </div>
+
+    <!-- ── STEP 3: Live streaming ── -->
+    <div id="cam-live" style="display:none;position:fixed;inset:0;background:#000;z-index:50">
+      <video id="cam-live-vid" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+
+      <!-- top bar -->
+      <div style="position:absolute;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:linear-gradient(to bottom,rgba(0,0,0,.85),transparent)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="background:var(--danger);color:#fff;font-size:10px;font-family:'Space Mono',monospace;padding:4px 11px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px">● LIVE</div>
+          <div id="cam-live-label" style="font-family:'Bebas Neue',cursive;font-size:20px;color:var(--gold);letter-spacing:2px"></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="flipCam()" style="padding:8px 14px;border-radius:9px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">🔄 Flip</button>
+          <button onclick="camSwitchPlayer()" style="padding:8px 14px;border-radius:9px;background:rgba(91,76,255,.3);border:1px solid rgba(91,76,255,.5);color:var(--accent);font-size:12px;cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:600">👥 Switch</button>
+          <button onclick="stopCamStream()" style="padding:8px 18px;border-radius:9px;background:rgba(231,76,60,.55);border:1px solid rgba(231,76,60,.8);color:#fff;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;box-shadow:0 0 18px rgba(231,76,60,.35)">⏹ End Stream</button>
+        </div>
+      </div>
+
+      <!-- filming info bottom -->
+      <div style="position:absolute;bottom:22px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(0,0,0,.7);border:1px solid rgba(245,200,66,.35);border-radius:13px;padding:10px 24px;text-align:center;backdrop-filter:blur(10px);white-space:nowrap">
+        <div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:2px;text-transform:uppercase;margin-bottom:3px">Now Filming</div>
+        <div id="cam-live-name" style="font-family:'Bebas Neue',cursive;font-size:28px;color:var(--gold);letter-spacing:2px;line-height:1"></div>
+        <div id="cam-live-gamecode" style="font-family:'Space Mono',monospace;font-size:10px;color:rgba(245,200,66,.45);margin-top:3px;letter-spacing:2px"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
 
 <!-- ADMIN -->
 <div id="screen-admin" class="screen">
@@ -528,7 +698,7 @@ video{background:#000;}
       <div class="anav" onclick="aTab('quizzes',this)"><span>📚</span>Quiz Library</div>
       <div class="anav" onclick="aTab('session',this)"><span>⚡</span>Live Session</div>
       <div class="aslbl">Monitoring</div>
-      <div class="anav" onclick="aTab('cameras',this)"><span>📹</span>Camera Setup</div>
+      <div class="anav" onclick="aTab('cameras',this)"><span>📹</span>Camera Feeds</div>
       <div class="anav" onclick="aTab('scores',this)"><span>🏆</span>Leaderboard</div>
       <div class="aslbl">System</div>
       <div class="anav" onclick="aTab('arch',this)"><span>🏗️</span>Architecture</div>
@@ -540,6 +710,73 @@ video{background:#000;}
       <div id="ap-cameras" class="apage"></div>
       <div id="ap-scores" class="apage"></div>
       <div id="ap-arch" class="apage"></div>
+    </div>
+  </div>
+</div>
+
+<!-- IMPORT MODAL -->
+<div class="modal-ov" id="mimport">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-hdr">
+      <div class="modal-t">📥 IMPORT QUESTIONS</div>
+      <button class="modal-x" onclick="closeM('mimport')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <!-- Format tabs -->
+        <div style="display:flex;gap:8px">
+          <button class="ptab on" id="itab-csv" onclick="switchImportTab('csv')">📊 Google Forms CSV</button>
+          <button class="ptab" id="itab-txt" onclick="switchImportTab('txt')">📄 Text / Word</button>
+          <button class="ptab" id="itab-paste" onclick="switchImportTab('paste')">📋 Paste Text</button>
+        </div>
+        <!-- CSV instructions -->
+        <div id="import-csv" style="display:block">
+          <div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:12px 14px;font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:12px">
+            <strong style="color:var(--text)">Google Forms → CSV:</strong><br>
+            1. Open your Google Form → Responses tab<br>
+            2. Click the Sheets icon to open in Google Sheets<br>
+            3. File → Download → Comma Separated Values (.csv)<br>
+            4. Upload the CSV file below
+          </div>
+          <input type="file" id="import-file-csv" accept=".csv" onchange="previewImport('csv')" style="display:none">
+          <button class="btn btn-outline btn-block" onclick="document.getElementById('import-file-csv').click()">📂 Choose CSV File</button>
+          <div id="import-csv-name" style="font-size:12px;color:var(--muted);margin-top:6px;text-align:center"></div>
+        </div>
+        <!-- TXT/DOCX instructions -->
+        <div id="import-txt" style="display:none">
+          <div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:12px 14px;font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:12px">
+            <strong style="color:var(--text)">Word / Text format:</strong><br>
+            Each question must follow this pattern:<br>
+            <code style="background:rgba(0,0,0,.4);padding:4px 8px;border-radius:5px;display:block;margin-top:6px;font-size:11px">Q1. What is the capital of France?<br>A) London  B) Paris  C) Berlin  D) Rome<br>Answer: B</code>
+          </div>
+          <input type="file" id="import-file-txt" accept=".txt,.doc,.docx" onchange="previewImport('txt')" style="display:none">
+          <button class="btn btn-outline btn-block" onclick="document.getElementById('import-file-txt').click()">📂 Choose File (.txt or .docx)</button>
+          <div id="import-txt-name" style="font-size:12px;color:var(--muted);margin-top:6px;text-align:center"></div>
+        </div>
+        <!-- Paste -->
+        <div id="import-paste" style="display:none">
+          <div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:12px 14px;font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:12px">
+            <strong style="color:var(--text)">Paste format:</strong> One question per block:<br>
+            <code style="background:rgba(0,0,0,.4);padding:4px 8px;border-radius:5px;display:block;margin-top:6px;font-size:11px">Q1. Your question here?<br>A) Option 1  B) Option 2  C) Option 3  D) Option 4<br>Answer: A</code>
+          </div>
+          <textarea id="import-paste-text" class="ifield" rows="8" placeholder="Paste your questions here…" style="font-family:Space Mono,monospace;font-size:12px"></textarea>
+        </div>
+        <!-- Preview -->
+        <div id="import-preview" style="display:none">
+          <div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">Preview</div>
+          <div id="import-preview-list" style="max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:6px"></div>
+        </div>
+        <!-- Target quiz name -->
+        <div class="ig" style="margin-bottom:0">
+          <label class="lbl">Import into quiz named</label>
+          <input class="ifield" id="import-quiz-name" placeholder="e.g. General Knowledge Round 1">
+        </div>
+      </div>
+    </div>
+    <div class="modal-ftr">
+      <button class="btn btn-ghost btn-sm" onclick="closeM('mimport')">Cancel</button>
+      <button class="btn btn-outline btn-sm" onclick="previewImport(currentImportTab)">👁 Preview</button>
+      <button class="btn btn-primary btn-sm" onclick="doImport()">✅ Import Questions</button>
     </div>
   </div>
 </div>
@@ -617,6 +854,9 @@ function initFirebaseSync() {
     return;
   }
   updateFbBadge(true, 'Connected to Firebase ✓');
+  // Start watching Firebase for cross-device camera presence (WebRTC)
+  rtcWatchForCameras();
+
   // ── Listen: game state → sync into S and re-render ──
   fb.onGame(gameData => {
     if (!gameData) {
@@ -662,13 +902,19 @@ function initFirebaseSync() {
     if (!S.ain && S.me && S.playerCode === S.gc && gameData.launched && !gameData.paused) {
       document.getElementById('tgame').disabled = false;
       const onLobby = document.getElementById('screen-lobby').classList.contains('active');
+      const onGame  = document.getElementById('screen-game').classList.contains('active');
       if (onLobby) go('game');
-      else if (document.getElementById('screen-game').classList.contains('active')) {
+      else if (onGame) {
         if (typeof isFast==='function' && isFast()) renderFastPlayerScreen();
+        else if (getMode()==='single') renderSinglePlayerView();
       }
     }
     renderOverview(); renderProj(); renderSession(); renderLobby(); renderScores(); updateFloatBar();
-    if(!S.ain && S.me && typeof isFast==='function' && isFast() && document.getElementById('screen-game').classList.contains('active')) renderFastPlayerScreen();
+    // Re-render player screens if already on game screen
+    if (!S.ain && S.me && document.getElementById('screen-game').classList.contains('active')) {
+      if (typeof isFast==='function' && isFast()) renderFastPlayerScreen();
+      else if (getMode()==='single') renderSinglePlayerView();
+    }
   });
 
   // ── Listen: players list → sync into S.players and re-render everywhere ──
@@ -760,7 +1006,11 @@ function go(id){
   if(id==='projector') renderProj();
   if(id==='join') renderJoin();
   if(id==='lobby') renderLobby();
-  if(id==='game' && !S.ain && S.me && typeof isFast==='function' && isFast()) renderFastPlayerScreen();
+  if(id==='camera') renderCamScreen();
+  if(id==='game' && !S.ain && S.me){
+    if(typeof isFast==='function' && isFast()) renderFastPlayerScreen();
+    else if(getMode()==='single') renderSinglePlayerView();
+  }
 }
 
 // ═══ AUTH ═══
@@ -803,7 +1053,7 @@ function aTab(tab,el){
   if(pg) pg.classList.add('on');
   if(el) el.classList.add('on');
   // When switching to cameras tab, poll camera devices immediately
-  if(tab==='cameras') usbRefreshDevices && usbRefreshDevices();
+  if(tab==='cameras' && _bc) _bc.postMessage({ type: 'admin-poll' });
   const renders={overview:renderOverview,quizzes:renderQL,session:renderSession,cameras:renderCameras,scores:renderScores,arch:renderArch};
   if(renders[tab]) renders[tab]();
 }
@@ -895,8 +1145,7 @@ function endGame(){
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
   S.curQ=0; S.paused=false; S.revealAns=false; S.pickedAns=null; S.launched=false;
   S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
-  // Stop all USB camera streams
-  if(typeof usbStopAll==='function') usbStopAll();
+  // Clear streams so camera screen shows 'No feed' for next game
   S.streams={};
   sessionStorage.removeItem('qs_player');
   try { localStorage.removeItem('qs_cam'); } catch(e){}
@@ -1051,22 +1300,796 @@ function updateFloatBar(){
 //     Video flows peer-to-peer after handshake
 // ════════════════════════════════════════════════════════════
 if(!S.streams) S.streams={};
-// USB camera variables (replacing old camera tab variables)
+let _camFace = 'environment';
+let _camActivePlayer = null;
+let _camCurrentStream = null;
+let _camSelectedPlayer = null;
+let _camLoadedCode = null;
 
-// USB camera system — no BroadcastChannel needed
-const _bc = null; // kept as null for legacy compat
+// BroadcastChannel — same-origin same-browser tab sync
+const _bc = (() => {
+  try { return new BroadcastChannel('quizstage_cam'); } catch(e){ return null; }
+})();
 
-// USB camera system — no WebRTC/STUN needed for video
+// ════════════════════════════════════════════════════════════
+// WebRTC ENGINE
+// STUN = helps devices discover their public IPs so they can
+// connect directly. No video touches Google's server.
+// ════════════════════════════════════════════════════════════
+const _STUN = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+  ]
+};
 
-// USB camera system globals
+// Active RTCPeerConnections — keyed by playerName
+// Camera tab:    _rtcCallers[pname]  = RTCPeerConnection (caller/offerer)
+// Receiver tabs: _rtcAnswerers[pname] = RTCPeerConnection (answerer)
+if(!window._rtcCallers)   window._rtcCallers   = {};
 if(!window._rtcAnswerers) window._rtcAnswerers = {};
+// Firebase listener unsubscribe handles
 if(!window._rtcListeners) window._rtcListeners = {};
 
+// ── CALLER side (camera tab): start streaming to all peers ──
+async function rtcStartCall(stream, pname) {
+  if (!window._fb || !window._fb.ready()) {
+    console.warn('[WebRTC] Firebase not ready — cross-device streaming unavailable');
+    return;
+  }
 
+  // Close any previous caller connection for this player (don't re-use stale pc)
+  const oldPc = window._rtcCallers[pname];
+  if (oldPc) { try { oldPc.close(); } catch(e){} delete window._rtcCallers[pname]; }
+  // Unsub old listeners
+  const oldLs = window._rtcListeners[pname];
+  if (oldLs) {
+    ['unsubAnswer','unsubAnswerCand'].forEach(k => { try { if(oldLs[k]) oldLs[k](); } catch(e){} });
+  }
+
+  console.log('[WebRTC] Starting call for', pname);
+
+  // Wipe stale signalling data but keep structure
+  // Use a sub-path so we don't accidentally delete presence on restart
+  await window._fb.webrtcClearSignalling(pname).catch(() => {});
+
+  const pc = new RTCPeerConnection(_STUN);
+  window._rtcCallers[pname] = pc;
+
+  stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+  pc.onicecandidate = e => {
+    if (e.candidate && window._fb && window._fb.ready()) {
+      window._fb.webrtcAddCandidate(pname, 'offerCandidates', e.candidate.toJSON()).catch(() => {});
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('[WebRTC] Caller:', pc.connectionState, pname);
+    if (pc.connectionState === 'connected') {
+      toast('📹 '+x(pname)+' streaming via WebRTC ✓', 'ok');
+      renderCameras();
+    }
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      console.warn('[WebRTC] Connection lost, retrying in 3s…');
+      setTimeout(() => {
+        if (_camCurrentStream && _camActivePlayer === pname) rtcStartCall(_camCurrentStream, pname);
+      }, 3000);
+    }
+  };
+
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await window._fb.webrtcSendOffer(pname, { type: offer.type, sdp: offer.sdp });
+    console.log('[WebRTC] ✅ Offer written for', pname);
+  } catch(offerErr) {
+    console.error('[WebRTC] ❌ Offer failed for', pname, offerErr);
+    toast('Stream error: ' + offerErr.message, 'er');
+    return;
+  }
+
+  // Write presence LAST — receivers watch this to know when to start handshake
+  // Remove then re-add to ensure onChildAdded fires even on reconnect
+  await window._fb.webrtcSetPresence(pname, false).catch(() => {});
+  await new Promise(r => setTimeout(r, 100)); // brief pause so remove propagates
+  await window._fb.webrtcSetPresence(pname, true).catch(() => {});
+  console.log('[WebRTC] Offer + presence written for', pname);
+
+  const unsubAnswer = window._fb.webrtcOnAnswer(pname, async answer => {
+    if (pc.signalingState === 'have-local-offer') {
+      await pc.setRemoteDescription(new RTCSessionDescription(answer)).catch(console.warn);
+      console.log('[WebRTC] Answer set for', pname);
+    }
+  });
+
+  const unsubAnswerCand = window._fb.webrtcOnCandidates(pname, 'answerCandidates', async cand => {
+    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(console.warn);
+  });
+
+  window._rtcListeners[pname] = { unsubAnswer, unsubAnswerCand };
+}
+
+// ── Stop a caller-side peer connection ──
+function rtcStopCall(pname) {
+  const pc = window._rtcCallers[pname];
+  if (pc) { try { pc.close(); } catch(e){} delete window._rtcCallers[pname]; }
+  const ls = window._rtcListeners[pname];
+  if (ls) {
+    try { if(ls.unsubAnswer) ls.unsubAnswer(); } catch(e){}
+    try { if(ls.unsubAnswerCand) ls.unsubAnswerCand(); } catch(e){}
+    delete window._rtcListeners[pname];
+  }
+  if (window._fb && window._fb.ready()) {
+    // Clear presence so receivers know camera is gone
+    window._fb.webrtcSetPresence(pname, false).catch(() => {});
+    // Clear all signalling data
+    window._fb.webrtcClear(pname).catch(() => {});
+  }
+}
+
+// ── ANSWERER side (projector/admin tab): receive stream from camera ──
+async function rtcStartReceive(pname) {
+  if (!window._fb || !window._fb.ready()) return;
+
+  // If we're the caller for this player, never also be receiver
+  if (window._rtcCallers && window._rtcCallers[pname]) return;
+
+  // If already connected/connecting, skip
+  const existing = window._rtcAnswerers[pname];
+  if (existing) {
+    const s = existing.connectionState;
+    if (s === 'connected' || s === 'connecting' || s === 'new') return;
+    // Otherwise it's failed/disconnected — clean it up and restart
+    try { existing.close(); } catch(e){}
+    delete window._rtcAnswerers[pname];
+  }
+
+  console.log('[WebRTC] Receiver starting for', pname);
+
+  const pc = new RTCPeerConnection(_STUN);
+  window._rtcAnswerers[pname] = pc;
+  let answerSent = false; // guard: only send answer once per offer
+
+  pc.ontrack = e => {
+    const stream = e.streams && e.streams[0];
+    if (!stream) return;
+    console.log('[WebRTC] ✅ Track received for', pname);
+    S.streams[pname] = stream;
+    renderProj();
+    renderCameras();
+    if(S.ain) toast('📹 '+x(pname)+' live','ok');
+  };
+
+  pc.onicecandidate = e => {
+    if (e.candidate && window._fb && window._fb.ready()) {
+      window._fb.webrtcAddCandidate(pname, 'answerCandidates', e.candidate.toJSON()).catch(() => {});
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('[WebRTC] Receiver:', pc.connectionState, pname);
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      delete window._rtcAnswerers[pname];
+      answerSent = false;
+      renderCameras();
+    }
+  };
+
+  // Watch for offer — onValue handles both already-present and future offers
+  const unsubOffer = window._fb.webrtcOnOffer(pname, async offer => {
+    if (answerSent) return; // don't re-answer same offer
+    if (pc.signalingState !== 'stable') return;
+    console.log('[WebRTC] Offer received for', pname);
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await window._fb.webrtcSendAnswer(pname, { type: answer.type, sdp: answer.sdp });
+      answerSent = true;
+      console.log('[WebRTC] Answer sent for', pname);
+    } catch(err) {
+      console.warn('[WebRTC] Offer handling error:', err);
+    }
+  });
+
+  // Watch for caller ICE candidates
+  const unsubOfferCand = window._fb.webrtcOnCandidates(pname, 'offerCandidates', async cand => {
+    try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch(e){}
+  });
+
+  if (!window._rtcListeners[pname]) window._rtcListeners[pname] = {};
+  window._rtcListeners[pname].unsubOffer     = unsubOffer;
+  window._rtcListeners[pname].unsubOfferCand = unsubOfferCand;
+}
+
+// ── Stop a receiver-side peer connection ──
+function rtcStopReceive(pname) {
+  const pc = window._rtcAnswerers[pname];
+  if (pc) { try { pc.close(); } catch(e){} delete window._rtcAnswerers[pname]; }
+  const ls = window._rtcListeners[pname];
+  if (ls) {
+    ['unsubOffer','unsubOfferCand','unsubAnswer','unsubAnswerCand'].forEach(k => {
+      try { if(ls[k]) ls[k](); } catch(e){}
+    });
+    delete window._rtcListeners[pname];
+  }
+}
+
+// ── Start receiving for all players who have a cam-ready sentinel OR Firebase offer ──
+function rtcEnsureReceiving() {
+  if (!S.gon) return;
+  S.players.forEach(p => {
+    const sentinel = S.streams[p.name];
+    const hasRealStream = sentinel instanceof MediaStream;
+    // If we own this stream (caller), don't also receive it
+    const isCaller = window._rtcCallers && window._rtcCallers[p.name];
+    if (isCaller) return;
+    if (sentinel && !hasRealStream) {
+      rtcStartReceive(p.name);
+    }
+  });
+}
+
+// ── Watch Firebase for cameras going live (cross-device discovery) ──
+// Called once when Firebase is ready. Uses onChildAdded on the webrtc node —
+// fires for each existing child on load, plus new ones as they're added.
+// This means we catch cameras that went live before this tab even opened.
+function rtcWatchForCameras() {
+  if (!window._fb || !window._fb.ready()) return;
+  console.log('[WebRTC] Watching Firebase for camera presence…');
+
+  window._fb.webrtcOnAnyPresence(sanitisedKey => {
+    if (window._rtcCallers && (window._rtcCallers[sanitisedKey] ||
+        S.players.find(p => window._rtcCallers[p.name] && sanitisePlayerKey(p.name) === sanitisedKey))) return;
+
+    // Already have a live/connecting connection — skip
+    const existingPc = window._rtcAnswerers && window._rtcAnswerers[sanitisedKey];
+    const existingState = existingPc ? existingPc.connectionState : null;
+    if (existingState === 'connected' || existingState === 'connecting') return;
+
+    // Resolve real player name from sanitised key
+    const player = S.players.find(p => sanitisePlayerKey(p.name) === sanitisedKey || p.name === sanitisedKey);
+    const pname  = player ? player.name : sanitisedKey;
+
+    console.log('[WebRTC] 📹 Camera present:', sanitisedKey, '→', pname);
+
+    // Mark sentinel
+    if (!S.streams) S.streams = {};
+    if (!(S.streams[pname] instanceof MediaStream)) S.streams[pname] = 'remote';
+    // Also register by sanitised key in case name lookup differs
+    if (pname !== sanitisedKey && !(S.streams[sanitisedKey] instanceof MediaStream)) {
+      S.streams[sanitisedKey] = S.streams[pname];
+    }
+
+    // Start WebRTC receive handshake
+    rtcStartReceive(pname);
+    renderCameras();
+    renderProj();
+  });
+}
 
 // Helper: sanitise player name the same way Firebase module does
 function sanitisePlayerKey(s) { return String(s).replace(/[.#$[\]/]/g, '_'); }
+// ── Per-player canvas elements receiving cross-tab frames ──
+// Key: playerName → { canvas, ctx, active }
+if(!window._camCanvases) window._camCanvases = {};
+
+// ── Frame relay helpers ──
+let _frameRelayInterval = null;
+
+function _startFrameRelay(stream, pname){
+  if(_frameRelayInterval) clearInterval(_frameRelayInterval);
+  // Offscreen video to read frames from the live MediaStream
+  const offVid = document.createElement('video');
+  offVid.srcObject = stream;
+  offVid.muted = true;
+  offVid.play().catch(()=>{});
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width  = 480; // relay at reduced res for BC performance
+  offCanvas.height = 270;
+  const offCtx = offCanvas.getContext('2d');
+
+  _frameRelayInterval = setInterval(() => {
+    if(!_camCurrentStream || !_bc) return;
+    try {
+      offCtx.drawImage(offVid, 0, 0, 480, 270);
+      offCanvas.transferControlToOffscreen
+        ? null // don't use offscreen path here
+        : null;
+      // createImageBitmap is transferable and efficient
+      createImageBitmap(offCanvas).then(bmp => {
+        if(!_bc) return;
+        _bc.postMessage({ type:'cam-frame', player: pname, bmp }, [bmp]);
+      }).catch(()=>{});
+    } catch(e){}
+  }, 66); // ~15fps — smooth enough, low bandwidth
+}
+
+function _stopFrameRelay(){
+  if(_frameRelayInterval){ clearInterval(_frameRelayInterval); _frameRelayInterval=null; }
+}
+
+// ── Draw an incoming frame onto the correct canvas element ──
+function _applyFrame(pname, bmp){
+  // Find all canvas elements tagged for this player and draw
+  document.querySelectorAll('canvas[data-player="'+CSS.escape(pname)+'"]').forEach(cv => {
+    cv.width  = cv.offsetWidth  || bmp.width;
+    cv.height = cv.offsetHeight || bmp.height;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(bmp, 0, 0, cv.width, cv.height);
+  });
+  // Also keep a latest-frame reference so newly rendered canvases catch up
+  if(!window._camCanvases[pname]) window._camCanvases[pname] = {};
+  window._camCanvases[pname].lastBmp = bmp;
+  window._camCanvases[pname].active = true;
+}
+
+// ── Attach latest frame to a freshly rendered canvas ──
+function attachStream(canvasOrVideoEl, playerName){
+  if(!canvasOrVideoEl) return;
+  // If the element is a real <video> on the camera tab itself, use srcObject
+  if(S.streams[playerName] instanceof MediaStream){
+    if(canvasOrVideoEl.tagName === 'VIDEO'){
+      canvasOrVideoEl.srcObject = S.streams[playerName];
+      canvasOrVideoEl.play().catch(()=>{});
+    }
+    return;
+  }
+  // Otherwise we're on a receiver tab — the canvas will be painted by frame relay
+  // Paint the last received frame immediately so there's no blank flash
+  if(window._camCanvases[playerName] && window._camCanvases[playerName].lastBmp){
+    try {
+      const cv = canvasOrVideoEl;
+      cv.width  = cv.offsetWidth  || 480;
+      cv.height = cv.offsetHeight || 270;
+      cv.getContext('2d').drawImage(window._camCanvases[playerName].lastBmp, 0, 0, cv.width, cv.height);
+    } catch(e){}
+  }
+}
+
+if(_bc){
+  _bc.onmessage = ev => {
+    if(!ev.data) return;
+
+    // Admin tab polling — camera tab replies if it's streaming
+    if(ev.data.type==='admin-poll'){
+      if(_camCurrentStream && _camActivePlayer){
+        _bc.postMessage({ type:'cam-ready', player:_camActivePlayer });
+      }
+      return;
+    }
+
+    // Incoming video frame from camera tab
+    if(ev.data.type==='cam-frame'){
+      _applyFrame(ev.data.player, ev.data.bmp);
+      return;
+    }
+
+    if(ev.data.type==='cam-ready'){
+      if(!S.streams) S.streams = {};
+      // Mark as active with sentinel (real MediaStream lives on camera tab or via WebRTC)
+      if(ev.data.player) S.streams[ev.data.player] = S.streams[ev.data.player] instanceof MediaStream
+        ? S.streams[ev.data.player]  // already have real stream via WebRTC — keep it
+        : 'remote';                   // same-browser: use sentinel + frame relay
+      if(window._camCanvases[ev.data.player]) window._camCanvases[ev.data.player].active = true;
+      renderCameras(); renderProj(); // renderProj will call rtcEnsureReceiving
+      if(S.ain) toast('📹 '+x(ev.data.player)+' camera connected!','ok');
+    }
+
+    if(ev.data.type==='cam-stopped'){
+      if(S.streams) delete S.streams[ev.data.player];
+      if(window._camCanvases[ev.data.player]) window._camCanvases[ev.data.player].active = false;
+      rtcStopReceive(ev.data.player);  // close WebRTC receive connection
+      renderCameras(); renderProj();
+      if(S.ain) toast('📹 '+x(ev.data.player)+' camera disconnected.','nf');
+    }
+
+    if(ev.data.type==='cam-ping'){
+      if(!S.streams) S.streams = {};
+      if(ev.data.player) S.streams[ev.data.player] = S.streams[ev.data.player] || 'remote';
+    }
+  };
+}
+
+// ── Camera heartbeat ──
+let _camHeartbeat = null;
+
 // ── Render the camera setup screen ──
+function renderCamScreen(){
+  // If already streaming, skip re-render (do not disturb live state)
+  if(_camCurrentStream) return;
+
+  // Check for a saved camera session (e.g. after page reload)
+  let saved = null;
+  try { const raw = localStorage.getItem('qs_cam'); if(raw) saved = JSON.parse(raw); } catch(e){}
+
+  if(saved && saved.code && saved.player){
+    // Show a reconnect banner instead of blank step 1
+    camShowStep('code');
+    setCamFace(saved.face || 'environment', true);
+    // Pre-fill the code field
+    const inp = document.getElementById('cam-code-input');
+    if(inp) inp.value = saved.code;
+    // Show reconnect prompt
+    _camReconnectSession(saved);
+  } else {
+    camShowStep('code');
+    setCamFace(_camFace, true);
+  }
+}
+
+// Auto-reconnect a previous camera session after reload
+function _camReconnectSession(saved){
+  // Show a non-blocking reconnect notice at the top of step 1
+  const codeStep = document.getElementById('cam-step-code');
+  if(!codeStep) return;
+
+  // Remove any existing reconnect banner first
+  const existing = document.getElementById('cam-reconnect-banner');
+  if(existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'cam-reconnect-banner';
+  banner.style.cssText = 'background:rgba(91,76,255,.12);border:1px solid rgba(91,76,255,.4);border-radius:14px;padding:16px 18px;margin-bottom:18px;text-align:left;';
+  banner.innerHTML =
+    '<div style="font-size:12px;color:rgba(255,255,255,.5);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:6px">📹 Previous Session Found</div>'
+   +'<div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:4px">'+x(saved.player)+'</div>'
+   +'<div style="font-size:12px;color:rgba(255,255,255,.45);margin-bottom:12px">Code: '+x(saved.code)+'</div>'
+   +'<div style="display:flex;gap:8px">'
+   +'<button onclick="_camDoReconnect()" style="flex:1;padding:9px;border-radius:9px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">▶ Reconnect Camera</button>'
+   +'<button onclick="_camDismissReconnect()" style="padding:9px 14px;border-radius:9px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.5);font-size:13px;cursor:pointer">Dismiss</button>'
+   +'</div>';
+  codeStep.insertBefore(banner, codeStep.firstChild);
+}
+
+function _camDoReconnect(){
+  let saved = null;
+  try { const raw = localStorage.getItem('qs_cam'); if(raw) saved = JSON.parse(raw); } catch(e){}
+  if(!saved) return;
+  _camFace = saved.face || 'environment';
+  _camLoadedCode = saved.code;
+  _camSelectedPlayer = saved.player;
+  // If game state doesn't have this player, add a placeholder
+  if(S.gon && !S.players.find(p => p.name === saved.player)){
+    S.players.push({ name: saved.player, emoji: '📹', score: 0 });
+  }
+  startCamStream();
+  const b = document.getElementById('cam-reconnect-banner');
+  if(b) b.remove();
+}
+
+function _camDismissReconnect(){
+  try { localStorage.removeItem('qs_cam'); } catch(e){}
+  const b = document.getElementById('cam-reconnect-banner');
+  if(b) b.remove();
+}
+
+function camShowStep(step){
+  ['cam-step-code','cam-step-setup','cam-live'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.style.display='none';
+  });
+  const target = step==='code' ? 'cam-step-code'
+               : step==='setup'? 'cam-step-setup'
+               : 'cam-live';
+  const el=document.getElementById(target);
+  if(el) el.style.display='block';
+}
+
+// Step 1: user presses "Load Player List"
+function camLoadPlayers(){
+  const inp   = document.getElementById('cam-code-input');
+  const errEl = document.getElementById('cam-code-err');
+  const loadBtn = document.querySelector('#cam-step-code .btn-primary');
+  if(!inp) return;
+  const code = inp.value.trim().toUpperCase();
+  if(errEl){ errEl.style.display='none'; errEl.textContent=''; }
+
+  if(!code || code.length < 4){
+    if(errEl){ errEl.textContent='⚠️ Enter a valid game code (e.g. QZ-AB12)'; errEl.style.display='block'; }
+    return;
+  }
+
+  const proceed = (gameData) => {
+    // If we got a live game from Firebase, check code
+    if(gameData && gameData.gc && gameData.gc !== code){
+      if(errEl){ errEl.textContent='❌ Code "'+code+'" does not match the live game. Check the projector screen.'; errEl.style.display='block'; }
+      if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+      return;
+    }
+    // If Firebase has no game but local S does, check against that
+    if(!gameData && S.gon && S.gc && S.gc !== code){
+      if(errEl){ errEl.textContent='❌ Code "'+code+'" does not match the active game.'; errEl.style.display='block'; }
+      if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+      return;
+    }
+    // Merge Firebase players into S if not already present
+    if(gameData){ S.gon=true; S.gc=gameData.gc||code; }
+    _camLoadedCode = code;
+    if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+    camBuildSetupStep(code);
+    camShowStep('setup');
+  };
+
+  if(window._fb && window._fb.ready()){
+    if(loadBtn){ loadBtn.disabled=true; loadBtn.textContent='⏳ Checking…'; }
+    window._fb.getGame().then(proceed).catch(()=>{
+      if(loadBtn){ loadBtn.disabled=false; loadBtn.textContent='🔍 Load Player List'; }
+      // Can't reach Firebase — accept anyway and allow manual name
+      proceed(null);
+    });
+  } else {
+    proceed(null);
+  }
+}
+
+function camBuildSetupStep(code){
+  // Update code label
+  const lbl = document.getElementById('cam-setup-gamecode');
+  if(lbl) lbl.textContent = '🎮 ' + code;
+
+  // Build player selection cards
+  const cardBox = document.getElementById('cam-player-cards');
+  if(!cardBox) return;
+  cardBox.innerHTML = '';
+  _camSelectedPlayer = null;
+
+  const players = S.gon ? S.players : [];
+  if(players.length){
+    players.forEach(p=>{
+      const hasStream = !!(S.streams && S.streams[p.name]);
+      const card = document.createElement('div');
+      card.setAttribute('data-pname', p.name);
+      card.style.cssText = 'background:rgba(255,255,255,.05);border:2px solid rgba(255,255,255,.1);border-radius:13px;padding:14px 10px;text-align:center;cursor:pointer;transition:all .18s;position:relative;';
+      card.innerHTML = '<div style="font-size:28px;margin-bottom:6px">'+p.emoji+'</div>'
+        +'<div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:3px">'+x(p.name)+'</div>'
+        +'<div style="font-size:10px;color:'+(hasStream?'var(--safe)':'rgba(255,255,255,.3)')+';">'+(hasStream?'● Camera active':'No feed')+'</div>';
+      card.onclick = () => camSelectPlayer(p.name, card);
+      cardBox.appendChild(card);
+    });
+    // Hide manual input when players exist
+    const mw = document.getElementById('cam-manual-wrap');
+    if(mw) mw.style.display = 'none';
+  } else {
+    // No players in local state — show manual input
+    cardBox.innerHTML = '<div style="grid-column:1/-1;padding:18px;text-align:center;color:rgba(255,255,255,.35);font-size:13px;border:1px dashed rgba(255,255,255,.12);border-radius:11px">No players found locally.<br>Enter the contestant\'s name below.</div>';
+    const mw = document.getElementById('cam-manual-wrap');
+    if(mw) mw.style.display = 'block';
+  }
+}
+
+function camSelectPlayer(name, cardEl){
+  _camSelectedPlayer = name;
+  document.querySelectorAll('#cam-player-cards > div').forEach(c=>{
+    c.style.borderColor = 'rgba(255,255,255,.1)';
+    c.style.background = 'rgba(255,255,255,.05)';
+  });
+  if(cardEl){
+    cardEl.style.borderColor = 'rgba(91,76,255,.8)';
+    cardEl.style.background = 'rgba(91,76,255,.15)';
+  }
+  // Clear manual input
+  const mi = document.getElementById('cam-manual-input');
+  if(mi) mi.value = '';
+}
+
+function camGoBack(){
+  _camSelectedPlayer = null;
+  camShowStep('code');
+}
+
+// Enumerate physical camera devices for the device selector dropdown
+async function camEnumerateDevices(){
+  try{
+    // Must call getUserMedia once first to get labels
+    const tmp = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+    tmp.getTracks().forEach(t=>t.stop());
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevs = devices.filter(d=>d.kind==='videoinput');
+    const sel = document.getElementById('cam-device-sel');
+    if(!sel) return;
+    sel.innerHTML = '<option value="">— Auto (use facing mode) —</option>';
+    videoDevs.forEach((d,i)=>{
+      const opt=document.createElement('option');
+      opt.value=d.deviceId;
+      opt.textContent=d.label || ('Camera '+(i+1));
+      sel.appendChild(opt);
+    });
+    toast('Found '+videoDevs.length+' camera'+(videoDevs.length!==1?'s':''),'ok');
+  }catch(e){
+    toast('Could not list cameras: '+e.message,'er');
+  }
+}
+
+function setCamFace(mode, silent){
+  _camFace=mode;
+  const fu=document.getElementById('cam-face-user');
+  const fe=document.getElementById('cam-face-env');
+  if(!fu||!fe) return;
+  const on='background:rgba(91,76,255,.85);color:#fff;border:1px solid transparent;';
+  const off='background:rgba(255,255,255,.07);color:rgba(255,255,255,.5);border:1px solid rgba(255,255,255,.12);';
+  fu.style.cssText=(mode==='user'?on:off);
+  fe.style.cssText=(mode==='environment'?on:off);
+}
+
+async function startCamStream(){
+  const errEl=document.getElementById('cam-idle-err');
+  if(errEl){ errEl.style.display='none'; errEl.textContent=''; }
+
+  // Resolve player name: card selection > manual input
+  let pname = _camSelectedPlayer || '';
+  if(!pname){
+    const mi = document.getElementById('cam-manual-input');
+    pname = mi ? mi.value.trim() : '';
+  }
+  if(!pname){
+    if(errEl){ errEl.textContent='⚠️ Select a player card or enter a name first.'; errEl.style.display='block'; }
+    return;
+  }
+
+  // Stop any running stream
+  if(_camCurrentStream){
+    _camCurrentStream.getTracks().forEach(t=>t.stop());
+    _camCurrentStream=null;
+  }
+
+  // Build constraints — prefer specific deviceId if chosen
+  const devSel = document.getElementById('cam-device-sel');
+  const deviceId = devSel ? devSel.value : '';
+  const constraints = {
+    audio: false,
+    video: deviceId
+      ? { deviceId: { exact: deviceId }, width:{ideal:1920}, height:{ideal:1080} }
+      : { facingMode:{ ideal:_camFace }, width:{ideal:1920}, height:{ideal:1080} }
+  };
+
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    _camCurrentStream = stream;
+    _camActivePlayer  = pname;
+    S.streams[pname]  = stream;
+
+    // Wire to full-screen preview
+    const vid=document.getElementById('cam-live-vid');
+    if(vid){
+      vid.srcObject=stream;
+      vid.muted=true;
+      vid.playsInline=true;
+      const playVid=()=>vid.play().catch(e=>{
+        console.warn('[Cam] play() blocked, waiting for interaction:', e.message);
+        // Add a tap-to-play overlay if autoplay blocked
+        const ov=document.createElement('div');
+        ov.style.cssText='position:absolute;inset:0;z-index:99;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);cursor:pointer;';
+        ov.innerHTML='<div style="text-align:center"><div style="font-size:48px">▶</div><div style="color:#fff;font-size:16px;margin-top:8px">Tap to start camera</div></div>';
+        ov.onclick=()=>{vid.play().catch(()=>{});ov.remove();};
+        vid.parentElement.appendChild(ov);
+      });
+      playVid();
+    }
+
+    // Labels
+    const lbl=document.getElementById('cam-live-label');
+    const nm =document.getElementById('cam-live-name');
+    const gc =document.getElementById('cam-live-gamecode');
+    if(lbl) lbl.textContent='● STREAMING';
+    if(nm)  nm.textContent=pname;
+    if(gc)  gc.textContent=_camLoadedCode||S.gc||'';
+
+    // Notify sibling tabs
+    if(_bc) _bc.postMessage({type:'cam-ready', player:pname});
+
+    // Switch to live view
+    camShowStep('live');
+
+    // Attach to any already-rendered video elements for this player (same tab)
+    document.querySelectorAll('video[data-player="'+pname+'"]').forEach(v=>{
+      v.srcObject=stream; v.play().catch(()=>{});
+    });
+
+    // Start relaying frames to same-browser sibling tabs (projector open in same browser)
+    _startFrameRelay(stream, pname);
+
+    // Start WebRTC call so cross-device viewers (different phones/laptops) get the feed
+    rtcStartCall(stream, pname);
+
+    // Persist camera session so it can auto-reconnect after a reload
+    try {
+      localStorage.setItem('qs_cam', JSON.stringify({
+        code: _camLoadedCode || S.gc || '',
+        player: pname,
+        face: _camFace
+      }));
+    } catch(e){}
+
+    // Start heartbeat ping so admin tab knows this camera is still live
+    if(_camHeartbeat) clearInterval(_camHeartbeat);
+    _camHeartbeat = setInterval(() => {
+      if(_bc && _camActivePlayer && _camCurrentStream) {
+        _bc.postMessage({ type: 'cam-ping', player: _camActivePlayer });
+      } else {
+        clearInterval(_camHeartbeat);
+        _camHeartbeat = null;
+      }
+    }, 5000);
+
+    toast('📹 Streaming: '+pname,'ok');
+    renderCameras(); renderProj();
+
+  }catch(err){
+    const msg = err.name==='NotAllowedError'
+      ? '❌ Camera permission denied. Allow camera in browser settings then try again.'
+      : err.name==='NotFoundError'
+      ? '❌ No camera detected on this device.'
+      : err.name==='OverconstrainedError'
+      ? '❌ Selected camera unavailable. Try "Auto" in camera source.'
+      : '❌ Camera error: '+err.message;
+    if(errEl){ errEl.textContent=msg; errEl.style.display='block'; }
+  }
+}
+
+async function flipCam(){
+  _camFace = _camFace==='environment' ? 'user' : 'environment';
+  // Clear deviceId selection so facing mode takes over
+  const ds=document.getElementById('cam-device-sel');
+  if(ds) ds.value='';
+  if(_camCurrentStream && _camActivePlayer) await startCamStream();
+}
+
+function camSwitchPlayer(){
+  if(_camCurrentStream){
+    _camCurrentStream.getTracks().forEach(t=>t.stop());
+    _camCurrentStream=null;
+  }
+  if(_camActivePlayer){
+    rtcStopCall(_camActivePlayer);
+    delete S.streams[_camActivePlayer];
+    if(_bc) _bc.postMessage({type:'cam-stopped', player:_camActivePlayer});
+  }
+  _camActivePlayer=null;
+  _camSelectedPlayer=null;
+  try { localStorage.removeItem('qs_cam'); } catch(e){}
+  if(_camLoadedCode) camBuildSetupStep(_camLoadedCode);
+  camShowStep('setup');
+  renderCameras(); renderProj();
+}
+
+function stopCamStream(){
+  if(_camCurrentStream){
+    _camCurrentStream.getTracks().forEach(t=>t.stop());
+    _camCurrentStream=null;
+  }
+  if(_camActivePlayer){
+    delete S.streams[_camActivePlayer];
+    if(_bc) _bc.postMessage({type:'cam-stopped', player:_camActivePlayer});
+    _camActivePlayer=null;
+  }
+  _camSelectedPlayer=null;
+  // Clear persisted camera session and stop heartbeat
+  try { localStorage.removeItem('qs_cam'); } catch(e){}
+  if(_camHeartbeat){ clearInterval(_camHeartbeat); _camHeartbeat=null; }
+  _stopFrameRelay();
+  // Stop WebRTC peer connection for this player
+  if(_camActivePlayer) rtcStopCall(_camActivePlayer);
+  const vid=document.getElementById('cam-live-vid');
+  if(vid) vid.srcObject=null;
+  camShowStep('code');
+  renderCameras(); renderProj();
+  toast('Camera stopped.','nf');
+}
+
+// ── attach an existing stream to a <video> element ──
+function attachStream(videoEl, playerName){
+  if(S.streams&&S.streams[playerName]){
+    videoEl.srcObject=S.streams[playerName];
+    videoEl.play().catch(()=>{});
+  }
+}
+
+// ── no-op legacy shim ──
+async function requestCameraForPlayer(){ return null; }
 
 // ── Build the right media element for a player slot ──
 // Always <video> so WebRTC MediaStream can be assigned via srcObject.
@@ -1074,22 +2097,6 @@ function sanitisePlayerKey(s) { return String(s).replace(/[.#$[\]/]/g, '_'); }
 function _mediaEl(id, pname, styleExtra){
   const style = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000;' + (styleExtra||'');
   return '<video id="'+id+'" data-player="'+x(pname)+'" autoplay playsinline muted style="'+style+'"></video>';
-}
-
-// ── Re-wire all known streams to their video elements after a DOM rebuild ──
-function _rewireAllStreams(){
-  if(!S.streams) return;
-  document.querySelectorAll('video[data-player]').forEach(v => {
-    const pn = v.getAttribute('data-player');
-    const st = S.streams[pn];
-    if(st instanceof MediaStream && !v.srcObject){
-      v.srcObject = st;
-      v.play().catch(()=>{});
-      const phId = v.id==='proj-vid-main' ? 'proj-vid-ph' : v.id.replace('proj-vid-','proj-ph-');
-      const ph = document.getElementById(phId);
-      if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .5s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },500); }
-    }
-  });
 }
 
 // ── After innerHTML is set, attach real stream or paint last frame ──
@@ -1210,6 +2217,7 @@ function renderProj(){
 
   // Auto-start WebRTC receive for any players with live cameras
   // (no-op if already connected or if this is the camera tab itself)
+  rtcEnsureReceiving();
 }
 
 // ── SINGLE PLAYER projection ──
@@ -1290,7 +2298,6 @@ function _renderProjSingle(el, qd){
 
     el.innerHTML=h;
     _attachMedia('proj-vid-main', tp.name);
-    _rewireAllStreams();
     return;
   }
 
@@ -1414,7 +2421,6 @@ function _renderProjSingle(el, qd){
   h+='</div></div>';
   el.innerHTML=h;
   _attachMedia('proj-vid-main', tp.name);
-  _rewireAllStreams();
 }
 
 // ── MULTIPLAYER projection ──
@@ -1518,12 +2524,183 @@ function _renderProjMulti(el, qd){
 
   el.innerHTML=h;
   shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
-  _rewireAllStreams();
   if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
 }
 
 
 // ═══ QUIZ LIBRARY ═══
+
+// ═══ QUIZ IMPORT ═══
+let currentImportTab = 'csv';
+let _importedQuestions = [];
+
+function openImportModal(){
+  _importedQuestions = [];
+  document.getElementById('import-preview').style.display='none';
+  document.getElementById('import-quiz-name').value='';
+  ['csv','txt','paste'].forEach(t=>{ const el=document.getElementById('import-'+t); if(el) el.style.display='none'; });
+  document.getElementById('import-csv').style.display='block';
+  ['itab-csv','itab-txt','itab-paste'].forEach(id=>{ const el=document.getElementById(id); if(el) el.classList.remove('on'); });
+  document.getElementById('itab-csv').classList.add('on');
+  currentImportTab='csv';
+  openM('mimport');
+}
+
+function switchImportTab(tab){
+  currentImportTab=tab;
+  ['csv','txt','paste'].forEach(t=>{ const el=document.getElementById('import-'+t); if(el) el.style.display=t===tab?'block':'none'; });
+  ['csv','txt','paste'].forEach(t=>{ const el=document.getElementById('itab-'+t); if(el) el.classList.toggle('on',t===tab); });
+}
+
+function parseQuestionsFromText(text){
+  const questions=[];
+  const blocks = text.split(/(?=(?:Q\d+\.|\d+\.|\d+\))\s)/i).filter(b=>b.trim());
+  blocks.forEach(block=>{
+    block = block.trim();
+    const qMatch = block.match(/^(?:Q\d+\.|\d+\.|\d+\))\s*(.+?)(?=[\n\r]|A[).])/is);
+    if(!qMatch) return;
+    const qText = qMatch[1].trim();
+    const optMatch = block.match(/A[).]\s*(.+?)\s+B[).]\s*(.+?)\s+C[).]\s*(.+?)\s+D[).]\s*(.+?)(?:[\n\r]|Answer:|$)/is);
+    if(!optMatch) return;
+    const answers = [optMatch[1].trim(), optMatch[2].trim(), optMatch[3].trim(), optMatch[4].trim()];
+    const ansMatch = block.match(/Answer:\s*([A-D])/i);
+    if(!ansMatch) return;
+    const correct = 'ABCD'.indexOf(ansMatch[1].toUpperCase());
+    if(correct<0) return;
+    questions.push({ text:qText, answers, correct, difficulty:'mixed', time:30 });
+  });
+  return questions;
+}
+
+function parseQuestionsFromCSV(text){
+  const questions=[];
+  const rows = text.split('\n').filter(r=>r.trim());
+  if(rows.length<2) return questions;
+  // Find header row to locate columns
+  const header = rows[0].split(',').map(h=>h.replace(/"/g,'').trim().toLowerCase());
+  const qIdx = header.findIndex(h=>h.includes('question'));
+  const aIdx = [1,2,3,4].map(n=>header.findIndex(h=>h.includes('option '+n)||h.includes('answer '+n)||h==='a'+n||h==='choice '+n));
+  const correctIdx = header.findIndex(h=>h.includes('correct')||h.includes('answer'));
+  if(qIdx<0) return questions;
+  for(let i=1;i<rows.length;i++){
+    const cols = rows[i].match(/(".*?"|[^,]+)(?=,|$)/g)||[];
+    const clean = cols.map(c=>c.replace(/^"|"$/g,'').trim());
+    const qText = clean[qIdx];
+    if(!qText) continue;
+    const answers = aIdx.map(idx=>idx>=0?clean[idx]||'':'').filter(a=>a);
+    if(answers.length<2) continue;
+    const correctRaw = correctIdx>=0?clean[correctIdx]:'';
+    const correct = 'ABCD'.indexOf((correctRaw||'A').toUpperCase().trim()[0]);
+    questions.push({ text:qText, answers:answers.slice(0,4), correct:Math.max(0,correct), difficulty:'mixed', time:30 });
+  }
+  return questions;
+}
+
+async function previewImport(tab){
+  _importedQuestions=[];
+  if(tab==='paste'){
+    const txt=document.getElementById('import-paste-text').value;
+    _importedQuestions=parseQuestionsFromText(txt);
+  } else {
+    const fileInput=document.getElementById('import-file-'+tab);
+    if(!fileInput||!fileInput.files[0]){toast('Choose a file first','er');return;}
+    const file=fileInput.files[0];
+    const nameEl=document.getElementById('import-'+tab+'-name');
+    if(nameEl) nameEl.textContent='📄 '+file.name;
+    const text=await file.text();
+    _importedQuestions=tab==='csv'?parseQuestionsFromCSV(text):parseQuestionsFromText(text);
+  }
+  const preview=document.getElementById('import-preview');
+  const list=document.getElementById('import-preview-list');
+  if(!_importedQuestions.length){
+    toast('No questions found. Check the format.','er');
+    preview.style.display='none';
+    return;
+  }
+  preview.style.display='block';
+  list.innerHTML=_importedQuestions.map((q,i)=>
+    '<div style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:9px 12px">'+
+    '<div style="font-size:12px;font-weight:700;margin-bottom:4px;color:#fff">Q'+(i+1)+'. '+x(q.text)+'</div>'+
+    '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
+    q.answers.map((a,ai)=>'<span style="font-size:10px;padding:2px 8px;border-radius:20px;background:'+(ai===q.correct?'rgba(46,204,113,.2)':'rgba(255,255,255,.06)')+';color:'+(ai===q.correct?'var(--safe)':'var(--muted)')+'">'+['A','B','C','D'][ai]+') '+x(a)+'</span>').join('')+
+    '</div></div>'
+  ).join('');
+  toast('Found '+_importedQuestions.length+' question'+(  _importedQuestions.length!==1?'s':''),'ok');
+}
+
+function doImport(){
+  if(!_importedQuestions.length){toast('Preview first to check questions','er');return;}
+  const name=(document.getElementById('import-quiz-name').value||'').trim();
+  if(!name){toast('Give this quiz a name','er');document.getElementById('import-quiz-name').focus();return;}
+  const quiz={
+    id:uid(), emoji:'📥', title:name, category:'general', difficulty:'mixed',
+    status:'draft', desc:'Imported quiz', mode:'single', submode:'default',
+    questions:_importedQuestions
+  };
+  S.quizzes.push(quiz);
+  persistQuizzes();
+  closeM('mimport');
+  renderQL();
+  toast('Imported '+_importedQuestions.length+' questions into "'+name+'"','ok');
+}
+
+// ═══ QUIZ PRINT ═══
+function printQuiz(id){
+  const q=S.quizzes.find(z=>z.id===id);
+  if(!q){toast('Quiz not found','er');return;}
+  const letters=['A','B','C','D'];
+  let html='<!DOCTYPE html><html><head><meta charset="UTF-8">';
+  html+='<title>'+q.title+' — Quiz Print</title>';
+  html+='<style>';
+  html+='body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:30px;color:#111;font-size:14px}';
+  html+='h1{font-size:24px;margin-bottom:4px}';
+  html+='.meta{color:#666;font-size:12px;margin-bottom:28px}';
+  html+='.question{margin-bottom:24px;page-break-inside:avoid}';
+  html+='.qnum{font-weight:700;font-size:15px;margin-bottom:6px}';
+  html+='.options{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}';
+  html+='.opt{padding:7px 11px;border:1.5px solid #ddd;border-radius:7px;font-size:13px}';
+  html+='.opt.correct{border-color:#27ae60;background:#eafaf1;font-weight:700}';
+  html+='.opt .mark{color:#27ae60;font-weight:900;margin-left:6px}';
+  html+='hr{border:none;border-top:2px solid #eee;margin:28px 0}';
+  html+='.answer-key{margin-top:28px}';
+  html+='.answer-key h2{font-size:18px;margin-bottom:14px}';
+  html+='.ak-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}';
+  html+='.ak-item{background:#f4f4f4;border-radius:7px;padding:7px 10px;font-size:13px}';
+  html+='.ak-item strong{color:#27ae60}';
+  html+='@media print{.no-print{display:none}}';
+  html+='</style></head><body>';
+  // Header
+  html+='<div class="no-print" style="background:#f0f0f0;padding:12px 16px;border-radius:8px;margin-bottom:20px;display:flex;align-items:center;gap:12px">';
+  html+='<span style="font-size:13px;color:#555">Print this page or save as PDF</span>';
+  html+='<button onclick="window.print()" style="margin-left:auto;padding:8px 18px;border-radius:7px;background:#5B4CFF;border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">🖨️ Print</button>';
+  html+='</div>';
+  html+='<h1>'+q.emoji+' '+q.title+'</h1>';
+  html+='<div class="meta">'+q.questions.length+' questions · '+q.difficulty+' · '+q.category+'</div>';
+  // Questions
+  q.questions.forEach((qd,i)=>{
+    html+='<div class="question">';
+    html+='<div class="qnum">'+( i+1)+'. '+qd.text+'</div>';
+    html+='<div class="options">';
+    qd.answers.forEach((a,ai)=>{
+      const isCorrect=ai===qd.correct;
+      html+='<div class="opt'+(isCorrect?' correct':'')+'">'+letters[ai]+') '+a+(isCorrect?'<span class="mark">✓</span>':'')+'</div>';
+    });
+    html+='</div></div>';
+  });
+  // Answer key
+  html+='<hr><div class="answer-key">';
+  html+='<h2>Answer Key</h2>';
+  html+='<div class="ak-grid">';
+  q.questions.forEach((qd,i)=>{
+    html+='<div class="ak-item">Q'+(i+1)+': <strong>'+letters[qd.correct]+'</strong></div>';
+  });
+  html+='</div></div>';
+  html+='</body></html>';
+  const w=window.open('','_blank');
+  w.document.write(html);
+  w.document.close();
+}
+
 function renderQL(){
   const search=(document.getElementById('qsrch')||{value:''}).value||'';
   const filter=S.qf;
@@ -1533,7 +2710,11 @@ function renderQL(){
     if(search&&!q.title.toLowerCase().includes(search.toLowerCase()))return false;
     return true;
   });
-  let h='<div class="shdr"><div class="ptitle" style="margin-bottom:0">Quiz Library</div><button class="btn btn-primary btn-sm" onclick="openCQ()">＋ Create Quiz</button></div>';
+  let h='<div class="shdr"><div class="ptitle" style="margin-bottom:0">Quiz Library</div>';
+  h+='<div style="display:flex;gap:7px">';
+  h+='<button class="btn btn-outline btn-sm" onclick="openImportModal()">📥 Import</button>';
+  h+='<button class="btn btn-primary btn-sm" onclick="openCQ()">＋ Create Quiz</button>';
+  h+='</div></div>';
   h+='<div class="qft">';
   ['all','published','draft'].forEach(f=>{
     const lbl={all:'All',published:'✅ Published',draft:'📝 Drafts'}[f];
@@ -1563,6 +2744,7 @@ function renderQL(){
       h+='<div class="qacts">';
       h+='<button class="qab qabe" title="Edit" onclick="openEQ(\''+q.id+'\')">✏️</button>';
       h+='<button class="qab qabd" title="Duplicate" onclick="dupQ(\''+q.id+'\')">⧉</button>';
+      h+='<button class="qab" title="Print with answers" onclick="printQuiz(\''+q.id+'\')">🖨️</button>';
       h+=rlbtn;
       h+='<button class="qab qabx" title="Delete" onclick="confDel(\''+q.id+'\')">🗑️</button>';
       h+='</div></div></div>';
@@ -1946,164 +3128,183 @@ function toggleReveal(){
 }
 
 // ═══ CAMERAS ═══
-// ═══ USB CAMERA ASSIGNMENT (Admin) ═══
-// Admin assigns USB webcams (phones connected via DroidCam/EpocCam) to players
-// Streams are captured locally on the admin computer — no WiFi/WebRTC for video
-
-let _usbStreams = {};        // pname → MediaStream (USB camera feed)
-let _usbDevices = [];        // cached list of video input devices
-let _usbAssignments = {};    // pname → deviceId
-
-async function usbRefreshDevices(){
-  try {
-    // Request permission first
-    const tmp = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
-    tmp.getTracks().forEach(t=>t.stop());
-    const all = await navigator.mediaDevices.enumerateDevices();
-    _usbDevices = all.filter(d=>d.kind==='videoinput');
-    renderCameras();
-    toast('Found '+_usbDevices.length+' camera'+(  _usbDevices.length!==1?'s':''),'ok');
-  } catch(e) {
-    toast('Camera access denied: '+e.message,'er');
-  }
-}
-
-async function usbAssign(pname, deviceId){
-  // Stop existing stream for this player
-  if(_usbStreams[pname]){
-    _usbStreams[pname].getTracks().forEach(t=>t.stop());
-    delete _usbStreams[pname];
-    delete S.streams[pname];
-  }
-  if(!deviceId){ renderCameras(); renderProj(); return; }
-  _usbAssignments[pname] = deviceId;
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { deviceId:{exact:deviceId}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30} }
-    });
-    _usbStreams[pname] = stream;
-    S.streams[pname] = stream;
-    renderCameras();
-    renderProj();
-    // After renderProj creates video elements, wire the stream directly
-    setTimeout(() => {
-      document.querySelectorAll('video[data-player]').forEach(v => {
-        if(v.getAttribute('data-player') !== pname) return;
-        if(!v.srcObject){ v.srcObject = stream; v.play().catch(()=>{}); }
-        const phId = v.id==='proj-vid-main' ? 'proj-vid-ph' : v.id.replace('proj-vid-','proj-ph-');
-        const ph = document.getElementById(phId);
-        if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .5s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },500); }
-      });
-    }, 100);
-    toast('📹 '+pname+' camera started','ok');
-  } catch(e) {
-    toast('Failed to start camera for '+pname+': '+e.message,'er');
-    delete _usbAssignments[pname];
-  }
-}
-
-function usbStop(pname){
-  if(_usbStreams[pname]){
-    _usbStreams[pname].getTracks().forEach(t=>t.stop());
-    delete _usbStreams[pname];
-    delete S.streams[pname];
-    delete _usbAssignments[pname];
-    renderCameras(); renderProj();
-    toast('📹 '+pname+' camera stopped','nf');
-  }
-}
-
-function usbStopAll(){
-  Object.entries(_usbStreams).forEach(([pname, stream])=>{
-    stream.getTracks().forEach(t=>t.stop());
-    delete S.streams[pname];
-  });
-  _usbStreams = {};
-  _usbAssignments = {};
-  renderCameras(); renderProj();
-}
-
 function renderCameras(){
-  const n = S.players.length;
-  let h = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">';
-  h += '<div class="ptitle" style="margin-bottom:0">📹 Camera Assignment</div>';
-  h += '<div style="display:flex;gap:8px;align-items:center">';
-  h += '<span class="tag tg">'+n+' Player'+(n!==1?'s':'')+'</span>';
-  h += '<button onclick="usbRefreshDevices()" class="btn btn-outline btn-sm">🔄 Detect Cameras</button>';
-  if(Object.keys(_usbStreams).length > 0)
-    h += '<button onclick="usbStopAll()" class="btn btn-danger btn-sm">⏹ Stop All</button>';
-  h += '</div></div>';
+  const n=S.players.length;
+  if(_bc) _bc.postMessage({type:'admin-poll'});
 
-  // Instructions
-  h += '<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.7">';
-  h += '<strong style="color:var(--text)">📱 USB Camera Setup:</strong> ';
-  h += 'Connect each phone to this computer via USB cable. Install ';
-  h += '<strong style="color:var(--accent)">DroidCam</strong> (Android) or ';
-  h += '<strong style="color:var(--accent)">EpocCam</strong> (iPhone) on the phone. ';
-  h += 'The phone will appear as a webcam below. Click <strong style="color:var(--text)">Detect Cameras</strong> to refresh the list, then assign each camera to a player.</div>';
+  let h='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
+  h+='<div class="ptitle" style="margin-bottom:0">Camera Feeds</div>';
+  h+='<span class="tag tg">'+n+' Player'+(n!==1?'s':'')+'</span></div>';
+  h+='<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:12px 15px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.6">';
+  h+='<strong style="color:var(--text)">📡 Camera Setup:</strong> Open the 📷 Camera tab on any device, enter the game code, pick a player and stream.<br>';
+  h+='<span style="color:rgba(91,76,255,.9);font-weight:600">Same browser</span> — instant via BroadcastChannel &nbsp;|&nbsp; ';
+  h+='<span style="color:rgba(46,204,113,.9);font-weight:600">Different device</span> — automatic WebRTC peer-to-peer (no server needed).</div>';
 
-  if(!_usbDevices.length){
-    h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)">';
-    h += '<div style="font-size:42px;margin-bottom:12px">🔌</div>';
-    h += '<div style="font-size:16px;font-weight:600;margin-bottom:6px">No Cameras Detected</div>';
-    h += '<div style="font-size:14px;margin-bottom:18px">Connect phones via USB and install DroidCam/EpocCam, then click Detect Cameras.</div>';
-    h += '<button onclick="usbRefreshDevices()" class="btn btn-primary">🔄 Detect Cameras</button>';
-    h += '</div>';
-  } else if(!n){
-    h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)">';
-    h += '<div style="font-size:42px;margin-bottom:12px">👥</div>';
-    h += '<div style="font-size:16px;font-weight:600">No Players Yet</div>';
-    h += '<div style="font-size:14px">Players appear here once they join an active game.</div></div>';
+  if(!n){
+    h+='<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:44px;text-align:center;color:var(--muted)"><div style="font-size:42px;margin-bottom:12px">📹</div><div style="font-size:16px;font-weight:600;margin-bottom:6px">No Players Yet</div><div style="font-size:14px">Feeds appear once players join an active game.</div></div>';
   } else {
-    h += '<div style="display:flex;flex-direction:column;gap:10px">';
-    S.players.forEach((p, i) => {
-      const assigned = _usbAssignments[p.name];
-      const active   = !!_usbStreams[p.name];
-      const statusBg = active ? 'var(--safe)' : assigned ? 'var(--warn)' : 'rgba(255,255,255,.2)';
-      const statusTx = active ? '● Live' : assigned ? '⟳ Starting…' : 'No feed';
-      h += '<div style="background:var(--card);border:1px solid '+(active?'rgba(46,204,113,.4)':'var(--border)')+';border-radius:13px;padding:13px 15px;display:flex;align-items:center;gap:12px">';
-      // Player info
-      h += '<div style="width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">'+p.emoji+'</div>';
-      h += '<div style="flex:1;min-width:0">';
-      h += '<div style="font-size:14px;font-weight:700;margin-bottom:3px">'+x(p.name)+'</div>';
-      h += '<div style="display:flex;align-items:center;gap:6px">';
-      h += '<span style="font-size:10px;background:'+statusBg+';color:'+(active?'#000':'#fff')+';padding:2px 8px;border-radius:20px;font-weight:700">'+statusTx+'</span>';
-      if(active) h += '<span style="font-size:10px;color:var(--muted)">'+(_usbDevices.find(d=>d.deviceId===assigned)||{label:'Camera'}).label+'</span>';
-      h += '</div></div>';
-      // Camera selector
-      h += '<select onchange="usbAssign(\'' + x(p.name).replace(/'/g,"\\'\\'") + '\',this.value)" style="background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:7px 11px;color:var(--text);font-family:DM Sans,sans-serif;font-size:13px;cursor:pointer;min-width:160px">';
-      h += '<option value="">— No camera —</option>';
-      _usbDevices.forEach(d => {
-        const sel = d.deviceId === assigned ? ' selected' : '';
-        h += '<option value="'+d.deviceId+'"'+sel+'>'+d.label+'</option>';
-      });
-      h += '</select>';
-      // Live preview + stop button
-      if(active){
-        h += '<div style="width:100px;height:56px;border-radius:8px;overflow:hidden;flex-shrink:0;background:#000;position:relative">';
-        h += '<video id="cam-prev-usb-'+i+'" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover"></video>';
-        h += '</div>';
-        h += '<button onclick="usbStop(\'' + x(p.name) + '\'" title="Stop this camera" style="width:34px;height:34px;border-radius:8px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.2);color:var(--danger);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">⏹</button>';
+    h+='<div class="feed-grid">';
+    S.players.forEach((p,i)=>{
+      const sentinel  = S.streams && S.streams[p.name];
+      const hasReal   = sentinel instanceof MediaStream;
+      const hasSent   = !!sentinel;
+      const answerer  = window._rtcAnswerers && window._rtcAnswerers[p.name];
+      const caller    = window._rtcCallers   && window._rtcCallers[p.name];
+      const rtcState  = answerer ? answerer.connectionState : caller ? caller.connectionState : 'none';
+      const rtcOk     = rtcState === 'connected';
+      const rtcBusy   = rtcState === 'connecting' || rtcState === 'new';
+      let badgeBg='var(--muted)', badgeText='No feed', badgeAnim='';
+      if(hasReal && rtcOk){ badgeBg='var(--safe)';   badgeText='● WebRTC Live'; badgeAnim='animation:pulse 2s infinite'; }
+      else if(hasReal)    { badgeBg='var(--danger)';  badgeText='● Live';        badgeAnim='animation:pulse 2s infinite'; }
+      else if(hasSent && rtcBusy){ badgeBg='var(--warn)'; badgeText='⟳ Connecting'; }
+      else if(hasSent)    { badgeBg='#5DADE2';        badgeText='● BC Live';     badgeAnim='animation:pulse 2s infinite'; }
+      h+='<div class="fcard'+(i===0?' fm':'')+'" onclick="setMain(this,\''+x(p.name)+'\')" style="cursor:pointer">';
+      h+='<div class="fvid" style="position:relative">';
+      if(hasSent){
+        if(hasReal){
+          h+='<video id="cam-prev-'+i+'" data-player="'+x(p.name)+'" autoplay playsinline muted style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1"></video>';
+        } else {
+          // Remote stream — canvas gets painted by frame relay or WebRTC ontrack
+          h+='<canvas id="cam-prev-'+i+'" data-player="'+x(p.name)+'" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000"></canvas>';
+        }
       }
-      h += '</div>';
+      h+='<span style="z-index:2;position:relative">'+(hasSent?'':p.emoji)+'</span>';
+      if(i===0) h+='<span style="position:absolute;top:7px;left:7px;z-index:3;background:var(--gold);color:var(--deep);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px">MAIN</span>';
+      h+='<span style="position:absolute;top:7px;right:7px;z-index:3;background:'+badgeBg+';color:#fff;font-size:9px;padding:2px 8px;border-radius:20px;'+badgeAnim+'">'+badgeText+'</span>';
+      if(rtcState!=='none'){
+        const rc=rtcOk?'var(--safe)':rtcBusy?'var(--warn)':'var(--danger)';
+        h+='<span style="position:absolute;bottom:7px;left:7px;z-index:3;background:rgba(0,0,0,.8);color:'+rc+';font-size:8px;padding:2px 8px;border-radius:20px;font-family:Space Mono,monospace">WebRTC: '+rtcState+'</span>';
+      }
+      h+='</div>';
+      h+='<div style="padding:8px 11px;font-size:13px;font-weight:600;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">';
+      h+=x(p.name)+'<span style="font-family:\'Space Mono\',monospace;font-size:11px;color:var(--gold)">'+(p.score||0)+' pts</span></div>';
+      h+='</div>';
     });
-    h += '</div>';
+    h+='</div>';
   }
-  document.getElementById('ap-cameras').innerHTML = h;
-
-  // Wire live preview videos
-  S.players.forEach((p, i) => {
-    const vid = document.getElementById('cam-prev-usb-'+i);
-    if(vid && _usbStreams[p.name]){
-      vid.srcObject = _usbStreams[p.name];
-      vid.play().catch(()=>{});
+  document.getElementById('ap-cameras').innerHTML=h;
+  S.players.forEach((p,i)=>{
+    const el=document.getElementById('cam-prev-'+i);
+    if(!el) return;
+    const stream=S.streams&&S.streams[p.name];
+    if(stream instanceof MediaStream){
+      // Real stream (same-tab camera owner or WebRTC received)
+      if(el.tagName==='VIDEO'){ el.srcObject=stream; el.play().catch(()=>{}); }
+    } else if(stream){
+      // Sentinel 'remote' — paint last canvas frame if we have one
+      const lastBmp = window._camCanvases&&window._camCanvases[p.name]&&window._camCanvases[p.name].lastBmp;
+      if(lastBmp && el.tagName==='CANVAS'){
+        el.width  = el.offsetWidth  || 480;
+        el.height = el.offsetHeight || 270;
+        try { el.getContext('2d').drawImage(lastBmp,0,0,el.width,el.height); } catch(e){}
+      }
     }
   });
 }
-
+function setMain(card,name){document.querySelectorAll('.fcard').forEach(c=>c.classList.remove('fm'));card.classList.add('fm');toast(name+' set as main feed.','nf');renderCameras();}
 
 // ═══ LEADERBOARD ═══
+
+function renderSinglePlayerView(){
+  if(!S.me) return;
+  const screen = document.getElementById('screen-game');
+  if(!screen) return;
+  const qd = S.aq && S.aq.questions && S.aq.questions[S.curQ||0];
+  const picked = S.pickedAns;
+  const revealed = picked !== null;
+  const hidden = (S.lifelines && S.lifelines.hiddenAnswers) || [];
+  const me = S.players.find(p=>p.name===S.me);
+  const score = me ? (me.score||0) : 0;
+  const isOver = S.gameOver;
+
+  // Ladder steps
+  const ladderSteps = [0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
+  const sf = [50,100];
+  const displaySteps = [...ladderSteps].reverse();
+
+  let h = '<div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f,#0d0c1e);display:flex;gap:0;overflow:hidden">';
+
+  // LEFT: Question + answers
+  h += '<div style="flex:1;display:flex;flex-direction:column;padding:20px 16px 20px 20px;gap:14px;overflow-y:auto">';
+
+  // Player chip
+  h += '<div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0">';
+  h += '<div style="font-size:22px">'+(me?me.emoji:'🎮')+'</div>';
+  h += '<div><div style="font-family:Bebas Neue,cursive;font-size:18px;color:var(--gold);letter-spacing:1px">'+x(S.me||'')+'</div>';
+  h += '<div style="font-size:11px;color:var(--muted)">Score: <span style="color:var(--safe);font-weight:700">'+score+' pts</span></div></div></div>';
+
+  if(isOver){
+    h += '<div style="flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;text-align:center">';
+    h += '<div style="font-size:64px">😔</div>';
+    h += '<div style="font-family:Bebas Neue,cursive;font-size:40px;color:var(--danger);letter-spacing:3px">GAME OVER</div>';
+    h += '<div style="font-size:14px;color:var(--muted)">Better luck next time!</div>';
+    h += '</div>';
+  } else if(S.paused){
+    h += '<div style="flex:1;display:flex;align-items:center;justify-content:center">';
+    h += '<div style="font-family:Bebas Neue,cursive;font-size:40px;color:var(--warn);letter-spacing:4px">⏸ PAUSED</div></div>';
+  } else {
+    // Quiz/question header
+    h += '<div style="background:rgba(91,76,255,.08);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:7px 13px;font-family:Space Mono,monospace;font-size:10px;color:rgba(245,200,66,.7);letter-spacing:1px;flex-shrink:0">';
+    h += '💰 '+(S.aq?x(S.aq.title.toUpperCase()):'QUIZ')+' — Q'+((S.curQ||0)+1)+' / '+(S.aq&&S.aq.questions?S.aq.questions.length:0)+'</div>';
+
+    // Question text
+    h += '<div style="background:rgba(0,0,0,.5);border:2px solid rgba(91,76,255,.35);border-radius:14px;padding:16px 18px;font-size:clamp(14px,2vw,20px);font-weight:600;line-height:1.55;color:#fff;flex-shrink:0">';
+    h += qd ? x(qd.text) : 'Waiting for question…';
+    h += '</div>';
+
+    // Answers — view only, not clickable
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;flex-shrink:0">';
+    const answers = qd ? qd.answers : ['A','B','C','D'];
+    answers.forEach((a,i) => {
+      const isHidden  = hidden.includes(i) && !revealed;
+      const isCorrect = qd && i===qd.correct;
+      const isPicked  = picked!==null && i===picked;
+      const isWrong   = isPicked && !isCorrect;
+      let bg,bdr,col,lBg,lCol;
+      if(isHidden)      { bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.04)'; col='rgba(255,255,255,.1)'; lBg='rgba(255,255,255,.04)'; lCol='rgba(255,255,255,.1)'; }
+      else if(!revealed){ bg='rgba(255,255,255,.06)'; bdr='rgba(255,255,255,.12)'; col='rgba(255,255,255,.75)'; lBg='rgba(255,255,255,.08)'; lCol='var(--gold)'; }
+      else if(isCorrect){ bg='rgba(46,204,113,.18)';  bdr='rgba(46,204,113,.8)';   col='var(--safe)'; lBg='rgba(46,204,113,.3)'; lCol='var(--safe)'; }
+      else if(isWrong)  { bg='rgba(231,76,60,.15)';   bdr='rgba(231,76,60,.75)';   col='var(--danger)'; lBg='rgba(231,76,60,.3)'; lCol='var(--danger)'; }
+      else              { bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.05)'; col='rgba(255,255,255,.2)'; lBg='rgba(255,255,255,.05)'; lCol='rgba(255,255,255,.18)'; }
+      const shadow = (isCorrect&&revealed)?'box-shadow:0 0 14px rgba(46,204,113,.25);':(isWrong?'box-shadow:0 0 12px rgba(231,76,60,.2);':'');
+      h += '<div style="background:'+bg+';border:2px solid '+bdr+';border-radius:11px;padding:9px 12px;display:flex;align-items:center;gap:8px;'+shadow+'cursor:default">';
+      h += '<div style="width:26px;height:26px;border-radius:6px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h += '<div style="font-size:12px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
+      if(isCorrect&&revealed) h += '<span style="font-size:14px">✅</span>';
+      if(isWrong)             h += '<span style="font-size:14px">❌</span>';
+      h += '</div>';
+    });
+    h += '</div>';
+
+    // View-only notice
+    h += '<div style="text-align:center;font-size:11px;color:rgba(255,255,255,.2);letter-spacing:1px;font-family:Space Mono,monospace">👁 VIEW ONLY — ANSWERS CONTROLLED BY HOST</div>';
+  }
+
+  h += '</div>';
+
+  // RIGHT: Ladder
+  h += '<div style="width:130px;flex-shrink:0;background:rgba(0,0,0,.6);border-left:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;overflow:hidden">';
+  h += '<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:8px 0 6px;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
+  h += '<div style="flex:1;display:flex;flex-direction:column;padding:3px 5px 4px;overflow:hidden">';
+  displaySteps.forEach(v => {
+    const isCur  = v===score;
+    const isPast = v < score;
+    const isSafe = sf.includes(v);
+    const bg  = isCur  ? 'background:rgba(245,200,66,.22);' : isPast ? 'background:rgba(46,204,113,.06);' : '';
+    const bdr = isCur  ? 'border:1.5px solid rgba(245,200,66,.7);' : isSafe&&!isPast ? 'border:1px solid rgba(46,204,113,.3);' : 'border:1px solid transparent;';
+    const col = isCur  ? 'color:var(--gold);font-weight:700;' : isPast ? 'color:rgba(46,204,113,.6);' : isSafe ? 'color:var(--safe);' : 'color:rgba(255,255,255,.3);';
+    const icon = isCur ? '▶' : isPast ? '✓' : isSafe ? '🛡' : '';
+    h += '<div style="display:flex;align-items:center;padding:0 4px;border-radius:4px;flex:1;min-height:14px;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:9px;font-weight:700">';
+    h += '<span style="width:14px;text-align:center;flex-shrink:0;font-size:9px">'+icon+'</span>';
+    h += '<span style="flex:1;padding:0 2px;font-size:9px">'+v+'</span>';
+    if(isSafe&&!isPast) h += '<span style="font-size:8px;color:var(--safe)">✓</span>';
+    h += '</div>';
+  });
+  h += '</div></div>';
+  h += '</div>';
+  screen.innerHTML = h;
+}
+
 function renderFastPlayerScreen(){
   if(!S.me) return;
   const screen=document.getElementById('screen-game'); if(!screen) return;
