@@ -1107,6 +1107,8 @@ function endGame(){
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
   S.curQ=0; S.paused=false; S.revealAns=false; S.pickedAns=null; S.launched=false;
   S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
+  // Stop OBS streams
+  if(typeof obsStopAllCams==='function') obsStopAllCams();
   // Clear streams so camera screen shows 'No feed' for next game
   S.streams={};
   sessionStorage.removeItem('qs_player');
@@ -2061,6 +2063,22 @@ function _mediaEl(id, pname, styleExtra){
   return '<video id="'+id+'" data-player="'+x(pname)+'" autoplay playsinline muted style="'+style+'"></video>';
 }
 
+// ── Re-wire all known streams to video elements after any DOM rebuild ──
+function _rewireAllStreams(){
+  if(!S.streams) return;
+  document.querySelectorAll('video[data-player]').forEach(v=>{
+    const pn = v.getAttribute('data-player');
+    const st = S.streams[pn];
+    if(st instanceof MediaStream && !v.srcObject){
+      v.srcObject = st;
+      v.play().catch(()=>{});
+      const phId = v.id==='proj-vid-main'?'proj-vid-ph':v.id.replace('proj-vid-','proj-ph-');
+      const ph = document.getElementById(phId);
+      if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .5s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },500); }
+    }
+  });
+}
+
 // ── After innerHTML is set, attach real stream or paint last frame ──
 function _attachMedia(id, pname){
   const el = document.getElementById(id);
@@ -2383,6 +2401,7 @@ function _renderProjSingle(el, qd){
   h+='</div></div>';
   el.innerHTML=h;
   _attachMedia('proj-vid-main', tp.name);
+  _rewireAllStreams();
 }
 
 // ── MULTIPLAYER projection ──
@@ -2486,6 +2505,7 @@ function _renderProjMulti(el, qd){
 
   el.innerHTML=h;
   shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
+  _rewireAllStreams();
   if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
 }
 
@@ -3089,262 +3109,433 @@ function toggleReveal(){
   toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
 
-// ═══ CAMERAS — Wirecast Integration ═══
-// Wirecast's built-in Web Server (Output → Web Server, default port 7272)
-// exposes a REST API at /api/channels that lists all available shots/layers.
-// This app fetches that list automatically — the admin just enters the URL
-// and clicks Connect. No manual shot name entry needed.
+// ═══ CAMERAS — OBS WebSocket Integration ═══
+// OBS Studio 28+ has WebSocket server built in (Tools → WebSocket Server Settings)
+// Default port: 4455. No password needed on local network (or set one below).
 //
-// Wirecast Web Server API endpoints used:
-//   GET /api/channels          → list of channels (shots) with id + name
-//   GET /outputclip/<id>       → MJPEG preview stream for a channel
+// How it works:
+//   1. Admin enters OBS WebSocket URL (ws://localhost:4455 or ws://192.168.x.x:4455)
+//   2. App connects and fetches scene list automatically
+//   3. Admin assigns each scene to a player
+//   4. Each scene's preview comes through as a video feed on the projection
 //
-// Setup in Wirecast:
-//   1. Go to Output → Web Server → Enable Web Server
-//   2. Note the port (default 7272)
-//   3. Enter http://<this-machine-ip>:7272 in the URL field below
+// For video feeds: OBS outputs each scene via a local HTTP server using the
+// obs-basic-mjpeg plugin OR via Virtual Camera (one at a time).
+// We also support a base HTTP URL for MJPEG feeds per scene.
 
-if(!window._wc) window._wc = {
-  baseUrl:  '',   // e.g. "http://192.168.1.x:7272"
-  shots:    [],   // [{ id, name }] — fetched automatically from Wirecast API
-  assigned: {},   // { playerName: shotId }
-  stopped:  {},   // { playerName: true }
-  status:   'idle' // 'idle' | 'connecting' | 'connected' | 'error'
+if(!window._obs) window._obs = {
+  wsUrl:    '',      // OBS WebSocket URL e.g. ws://localhost:4455
+  httpBase: '',      // Optional HTTP base for MJPEG feeds e.g. http://localhost:8080
+  password: '',      // OBS WebSocket password (leave blank if none)
+  scenes:   [],      // [{ name }] — fetched automatically from OBS
+  status:   'idle',  // idle | connecting | connected | error
+  assigned: {},      // { playerName: sceneName }
+  stopped:  {},      // { playerName: true }
+  streams:  {},      // { playerName: MediaStream } — from getUserMedia if virtual cam
 };
 
-function wcSaveSettings(){
-  try {
-    // Don't persist shots — always re-fetch from live Wirecast
-    const toSave = { baseUrl: window._wc.baseUrl, assigned: window._wc.assigned, stopped: window._wc.stopped };
-    localStorage.setItem('qs_wc', JSON.stringify(toSave));
-  } catch(e){}
+function obsSave(){
+  try{
+    const s = {wsUrl:window._obs.wsUrl, httpBase:window._obs.httpBase,
+               password:window._obs.password, assigned:window._obs.assigned, stopped:window._obs.stopped};
+    localStorage.setItem('qs_obs2', JSON.stringify(s));
+  }catch(e){}
 }
-function wcLoadSettings(){
-  try {
-    const raw = localStorage.getItem('qs_wc');
+function obsLoad(){
+  try{
+    const raw = localStorage.getItem('qs_obs2');
     if(raw){
       const p = JSON.parse(raw);
-      if(p){
-        if(p.baseUrl)  window._wc.baseUrl  = p.baseUrl;
-        if(p.assigned) window._wc.assigned = p.assigned;
-        if(p.stopped)  window._wc.stopped  = p.stopped;
-      }
+      if(p.wsUrl)    window._obs.wsUrl    = p.wsUrl;
+      if(p.httpBase) window._obs.httpBase = p.httpBase;
+      if(p.password) window._obs.password = p.password;
+      if(p.assigned) window._obs.assigned = p.assigned;
+      if(p.stopped)  window._obs.stopped  = p.stopped;
     }
-  } catch(e){}
+  }catch(e){}
 }
-wcLoadSettings();
+obsLoad();
 
-// Fetch available shots from Wirecast Web Server API
-async function wcFetchShots(){
-  const base = (window._wc.baseUrl || '').trim().replace(/\/+$/,'');
-  if(!base){ toast('Enter a Wirecast server URL first.','er'); return; }
-
-  window._wc.status = 'connecting';
-  window._wc.shots  = [];
+// Connect to OBS WebSocket and fetch scene list
+async function obsConnect(){
+  const wsUrlEl   = document.getElementById('obs-ws-url');
+  const httpEl    = document.getElementById('obs-http-base');
+  const passEl    = document.getElementById('obs-password');
+  if(wsUrlEl)   window._obs.wsUrl    = wsUrlEl.value.trim().replace(/\/+$/,'');
+  if(httpEl)    window._obs.httpBase = httpEl.value.trim().replace(/\/+$/,'');
+  if(passEl)    window._obs.password = passEl.value.trim();
+  window._obs.scenes = [];
+  window._obs.status = 'connecting';
+  obsSave();
   renderCameras();
+
+  const wsUrl = window._obs.wsUrl;
+  if(!wsUrl){ toast('Enter OBS WebSocket URL first.','er'); window._obs.status='idle'; renderCameras(); return; }
 
   try {
-    // Wirecast Web Server exposes channel list at /api/channels
-    const res = await fetch(base + '/api/channels', {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(6000)
-    });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-
-    // Wirecast returns: { channels: [{ id, name, ... }, ...] }
-    // Normalise to [{ id, name }]
-    const raw = Array.isArray(data) ? data
-              : Array.isArray(data.channels) ? data.channels
-              : Array.isArray(data.shots)    ? data.shots
-              : Array.isArray(data.sources)  ? data.sources
-              : [];
-
-    if(!raw.length) throw new Error('No channels returned — check Wirecast Web Server is enabled.');
-
-    window._wc.shots  = raw.map(c => ({ id: String(c.id || c.name), name: String(c.name || c.id) }));
-    window._wc.status = 'connected';
-    wcSaveSettings();
-    toast('Connected — ' + window._wc.shots.length + ' feed' + (window._wc.shots.length !== 1 ? 's' : '') + ' found.', 'ok');
-  } catch(e){
-    window._wc.status = 'error';
-    window._wc.shots  = [];
-    toast('Could not reach Wirecast: ' + e.message, 'er');
+    await obsWsFetchScenes(wsUrl, window._obs.password);
+  } catch(e) {
+    window._obs.status = 'error';
+    window._obs.scenes = [];
+    toast('OBS connection failed: '+e.message,'er');
+    renderCameras();
   }
+}
+
+// Connect via OBS WebSocket v5 protocol to get scene list
+function obsWsFetchScenes(wsUrl, password){
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    let identified = false;
+    const timer = setTimeout(()=>{ ws.close(); reject(new Error('Connection timed out')); }, 6000);
+
+    ws.onopen = () => {
+      // OBS WebSocket v5 sends Hello on connect, we respond with Identify
+    };
+
+    ws.onmessage = async (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch(e){ return; }
+
+      // Op 0 = Hello
+      if(msg.op === 0){
+        const identify = { op: 1, d: { rpcVersion: 1 } };
+        // If auth required, compute it
+        if(msg.d && msg.d.authentication){
+          if(!password){ ws.close(); clearTimeout(timer); reject(new Error('OBS password required — enter it below.')); return; }
+          try {
+            const auth = msg.d.authentication;
+            const secret = await obsHashAuth(password, auth.salt, auth.challenge);
+            identify.d.authentication = secret;
+          } catch(e){ ws.close(); clearTimeout(timer); reject(e); return; }
+        }
+        ws.send(JSON.stringify(identify));
+      }
+
+      // Op 2 = Identified (auth OK)
+      if(msg.op === 2){
+        // Request scene list
+        ws.send(JSON.stringify({ op:6, d:{ requestType:'GetSceneList', requestId:'scenes' } }));
+      }
+
+      // Op 7 = RequestResponse
+      if(msg.op === 7 && msg.d && msg.d.requestId === 'scenes'){
+        clearTimeout(timer);
+        const scenes = (msg.d.responseData && msg.d.responseData.scenes) || [];
+        window._obs.scenes = scenes.map(s => ({ name: s.sceneName || s.name || String(s) })).reverse();
+        window._obs.status = 'connected';
+        obsSave();
+        toast('OBS connected — '+window._obs.scenes.length+' scene'+(window._obs.scenes.length!==1?'s':'')+' found.','ok');
+        renderCameras();
+        ws.close();
+        resolve();
+      }
+    };
+
+    ws.onerror = (e) => { clearTimeout(timer); ws.close(); reject(new Error('WebSocket error — check URL and that OBS WebSocket is enabled.')); };
+    ws.onclose = () => { clearTimeout(timer); };
+  });
+}
+
+// Compute OBS WebSocket v5 auth hash
+async function obsHashAuth(password, salt, challenge){
+  const enc = new TextEncoder();
+  const secret = await crypto.subtle.digest('SHA-256', enc.encode(password + salt));
+  const secretB64 = btoa(String.fromCharCode(...new Uint8Array(secret)));
+  const auth = await crypto.subtle.digest('SHA-256', enc.encode(secretB64 + challenge));
+  return btoa(String.fromCharCode(...new Uint8Array(auth)));
+}
+
+function obsAssign(playerName, sceneName){
+  if(sceneName) window._obs.assigned[playerName] = sceneName;
+  else          delete window._obs.assigned[playerName];
+  obsSave();
   renderCameras();
 }
 
-// Preview URL for a shot — Wirecast serves MJPEG per channel at /outputclip/<id>
-function wcFeedUrl(shotId){
-  const base = (window._wc.baseUrl || '').trim().replace(/\/+$/,'');
-  if(!base || !shotId) return '';
-  return base + '/outputclip/' + encodeURIComponent(shotId);
+function obsStop(playerName){
+  window._obs.stopped[playerName] = true;
+  if(window._obs.streams[playerName]){
+    // Do not stop the stream — just flag as stopped for display
+  }
+  obsSave(); renderCameras();
+  toast('Feed stopped: '+playerName,'nf');
 }
 
-function wcStopFeed(playerName){
-  window._wc.stopped[playerName] = true;
-  wcSaveSettings(); renderCameras();
-  toast('Feed stopped: ' + playerName, 'nf');
+function obsStart(playerName){
+  delete window._obs.stopped[playerName];
+  obsSave(); renderCameras();
+  toast('Feed started: '+playerName,'ok');
 }
-function wcStartFeed(playerName){
-  delete window._wc.stopped[playerName];
-  wcSaveSettings(); renderCameras();
-  toast('Feed started: ' + playerName, 'ok');
+
+function obsStopAll(){
+  S.players.forEach(p=>{ window._obs.stopped[p.name]=true; });
+  obsSave(); renderCameras();
+  toast('All feeds stopped.','nf');
 }
-function wcStopAll(){
-  S.players.forEach(p => { window._wc.stopped[p.name] = true; });
-  wcSaveSettings(); renderCameras();
-  toast('All feeds stopped.', 'nf');
+
+function obsStartAll(){
+  window._obs.stopped = {};
+  obsSave(); renderCameras();
+  toast('All feeds started.','ok');
 }
-function wcStartAll(){
-  window._wc.stopped = {};
-  wcSaveSettings(); renderCameras();
-  toast('All feeds started.', 'ok');
+
+// Build MJPEG feed URL for a scene (requires OBS MJPEG server plugin or similar)
+function obsFeedUrl(sceneName){
+  const base = (window._obs.httpBase||'').trim().replace(/\/+$/,'');
+  if(!base||!sceneName) return '';
+  return base+'/'+encodeURIComponent(sceneName);
 }
-function wcSaveBase(){
-  const el = document.getElementById('wc-base-inp');
-  if(el){ window._wc.baseUrl = el.value.trim().replace(/\/+$/,''); }
-  // Reset connection state when URL changes
-  window._wc.shots  = [];
-  window._wc.status = 'idle';
-  wcSaveSettings();
-  renderCameras();
+
+// Start USB camera for a player (assigned scene name used as label)
+async function obsStartCam(playerName, deviceId){
+  if(!deviceId) return;
+  // Stop existing
+  if(window._obs.streams[playerName]){
+    window._obs.streams[playerName].getTracks().forEach(t=>t.stop());
+    delete window._obs.streams[playerName];
+    delete S.streams[playerName];
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio:false,
+      video:{ deviceId:{exact:deviceId}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30} }
+    });
+    window._obs.streams[playerName] = stream;
+    S.streams[playerName] = stream;
+    renderCameras();
+    renderProj();
+    // Wire to projection immediately
+    setTimeout(()=>{
+      document.querySelectorAll('video[data-player]').forEach(v=>{
+        if(v.getAttribute('data-player')!==playerName) return;
+        if(!v.srcObject){ v.srcObject=stream; v.play().catch(()=>{}); }
+        const phId=v.id==='proj-vid-main'?'proj-vid-ph':v.id.replace('proj-vid-','proj-ph-');
+        const ph=document.getElementById(phId);
+        if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .5s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },500); }
+      });
+    },120);
+    toast('📹 '+playerName+' camera live','ok');
+  }catch(e){
+    toast('Camera error: '+e.message,'er');
+  }
 }
-function wcAssignShot(playerName, shotId){
-  if(shotId) window._wc.assigned[playerName] = shotId;
-  else       delete window._wc.assigned[playerName];
-  wcSaveSettings(); renderCameras();
+
+async function obsDetectCams(){
+  try{
+    const tmp = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+    tmp.getTracks().forEach(t=>t.stop());
+    const all = await navigator.mediaDevices.enumerateDevices();
+    window._obs._devices = all.filter(d=>d.kind==='videoinput');
+    renderCameras();
+    toast('Found '+window._obs._devices.length+' camera device'+(window._obs._devices.length!==1?'s':''),'ok');
+  }catch(e){
+    toast('Camera permission denied','er');
+  }
+}
+
+function obsStopCam(playerName){
+  if(window._obs.streams[playerName]){
+    window._obs.streams[playerName].getTracks().forEach(t=>t.stop());
+    delete window._obs.streams[playerName];
+    delete S.streams[playerName];
+  }
+  renderCameras(); renderProj();
+}
+
+function obsStopAllCams(){
+  Object.keys(window._obs.streams||{}).forEach(pn=>{ obsStopCam(pn); });
+  renderCameras(); renderProj();
 }
 
 function renderCameras(){
-  const n      = S.players.length;
-  const shots  = window._wc.shots  || [];
-  const base   = window._wc.baseUrl || '';
-  const status = window._wc.status  || 'idle';
+  const n       = S.players.length;
+  const scenes  = window._obs.scenes || [];
+  const status  = window._obs.status || 'idle';
+  const devices = window._obs._devices || [];
 
-  let h = '<div class="ptitle">Camera Feeds — Wirecast</div>';
-
-  // ── Connection panel ──
-  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:16px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:12px">📡 Wirecast Server</div>';
-  h += '<div style="font-size:13px;color:var(--muted);margin-bottom:11px;line-height:1.6">';
-  h += 'In Wirecast go to <b style="color:var(--text)">Output → Web Server</b>, enable it, and note the port (default 7272). Enter the URL below and click Connect.';
-  h += '</div>';
-  h += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
-  h += '<input id="wc-base-inp" class="ifield" '
-     + 'placeholder="http://192.168.1.x:7272" '
-     + 'value="'+x(base)+'" '
-     + 'style="flex:1;min-width:200px;font-family:Space Mono,monospace;font-size:13px" '
-     + 'onkeydown="if(event.key===&quot;Enter&quot;){wcSaveBase();wcFetchShots();}">';
-  h += '<button class="btn btn-primary btn-sm" onclick="wcSaveBase();wcFetchShots();">🔌 Connect</button>';
-  h += '</div>';
-
-  // Status indicator
-  if(status === 'connecting'){
-    h += '<div style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn)">';
-    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--warn);animation:pulse 1s infinite;flex-shrink:0"></div>';
-    h += 'Connecting to Wirecast…</div>';
-  } else if(status === 'connected'){
-    h += '<div style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--safe)">';
-    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--safe);flex-shrink:0"></div>';
-    h += x(shots.length) + ' feed' + (shots.length !== 1 ? 's' : '') + ' available from <code style="font-family:Space Mono,monospace;color:var(--accent)">'+x(base)+'</code>';
-    h += '<button class="btn btn-ghost btn-xs" onclick="wcFetchShots()" style="margin-left:auto">🔄 Refresh</button>';
-    h += '</div>';
-  } else if(status === 'error'){
-    h += '<div style="margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--danger)">';
-    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--danger);flex-shrink:0"></div>';
-    h += 'Could not connect. Check URL and that Wirecast Web Server is enabled.';
-    h += '<button class="btn btn-ghost btn-xs" onclick="wcFetchShots()" style="margin-left:auto">Retry</button>';
+  let h = '';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">';
+  h += '<div class="ptitle" style="margin-bottom:0">📹 Camera Setup — OBS</div>';
+  if(status==='connected'){
+    h += '<div style="display:flex;gap:7px">';
+    h += '<button class="btn btn-outline btn-sm" onclick="obsConnect()">🔄 Refresh</button>';
+    h += '<button class="btn btn-danger btn-sm" onclick="obsStopAll()">⏹ Stop All</button>';
     h += '</div>';
   }
   h += '</div>';
 
-  // ── Assign panel ──
-  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:16px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:14px">🎯 Assign Feeds to Players</div>';
+  // ── Step 1: OBS WebSocket connection ──
+  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:10px">📡 OBS WebSocket</div>';
+  h += '<div style="font-size:13px;color:var(--muted);margin-bottom:12px;line-height:1.6">';
+  h += 'In OBS: <b style="color:var(--text)">Tools → WebSocket Server Settings</b> → Enable → note the port (default 4455).';
+  h += '</div>';
 
-  if(status !== 'connected'){
-    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;padding:10px 0">';
-    h += status === 'idle'
-      ? 'Enter the Wirecast server URL above and click Connect to load available feeds.'
-      : status === 'connecting'
-      ? 'Loading feeds…'
-      : 'Connection failed — fix the URL and retry.';
+  h += '<div style="display:flex;flex-direction:column;gap:8px">';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+  h += '<input id="obs-ws-url" class="ifield" placeholder="ws://localhost:4455" ';
+  h += 'value="'+x(window._obs.wsUrl)+'" ';
+  h += 'style="flex:1;min-width:200px;font-family:Space Mono,monospace;font-size:13px" ';
+  h += 'onkeydown="if(event.key===&quot;Enter&quot;) obsConnect()">';
+  h += '<input id="obs-password" class="ifield" type="password" placeholder="Password (if set)" ';
+  h += 'value="'+x(window._obs.password)+'" ';
+  h += 'style="width:160px;font-size:13px">';
+  h += '<button class="btn btn-primary btn-sm" onclick="obsConnect()">🔌 Connect & Fetch Scenes</button>';
+  h += '</div>';
+
+  // Status
+  if(status==='connecting'){
+    h += '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn);padding:4px 0">';
+    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--warn);animation:pulse 1s infinite;flex-shrink:0"></div>Connecting to OBS…</div>';
+  } else if(status==='connected'){
+    h += '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--safe);padding:4px 0">';
+    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--safe);flex-shrink:0"></div>';
+    h += '✅ Connected — <b>'+scenes.length+'</b> scene'+(scenes.length!==1?'s':'')+' found';
     h += '</div>';
+  } else if(status==='error'){
+    h += '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--danger);padding:4px 0">';
+    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--danger);flex-shrink:0"></div>';
+    h += '❌ Connection failed — check URL and that WebSocket Server is enabled in OBS.</div>';
+  }
+  h += '</div>';
+  h += '</div>';
+
+  // ── Step 2: Assign scenes to players ──
+  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
+  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600">🎯 Assign OBS Scenes to Players</div>';
+  h += '<button class="btn btn-outline btn-sm" onclick="obsDetectCams()">🎥 Detect USB Cameras</button>';
+  h += '</div>';
+
+  if(status!=='connected'){
+    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;padding:8px 0">Connect to OBS above to load scenes.</div>';
   } else if(!n){
-    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;padding:10px 0">No players have joined yet. Assignments will appear here once players join the game.</div>';
+    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;padding:8px 0">No players have joined yet.</div>';
   } else {
-    h += '<div style="display:flex;flex-direction:column;gap:9px">';
+    h += '<div style="display:flex;flex-direction:column;gap:12px">';
     S.players.forEach((p, i) => {
-      const assignedId = window._wc.assigned[p.name] || '';
-      const isStopped  = !!window._wc.stopped[p.name];
-      const hasAssign  = !!assignedId;
-      const assignedShot = shots.find(s => s.id === assignedId);
+      const assignedScene = window._obs.assigned[p.name] || '';
+      const isStopped     = !!window._obs.stopped[p.name];
+      const camStream     = window._obs.streams && window._obs.streams[p.name];
+      const hasStream     = camStream instanceof MediaStream;
+      const hasAssign     = !!assignedScene;
+      // Check if scene is already used by another player
+      const inUseBy = Object.entries(window._obs.assigned).find(([pn,sn])=>sn===assignedScene&&pn!==p.name);
+      const borderCol = hasStream&&!isStopped ? 'rgba(46,204,113,.5)' : hasAssign ? 'rgba(91,76,255,.4)' : 'var(--border)';
 
-      h += '<div style="display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid '+(hasAssign&&!isStopped?'rgba(46,204,113,.3)':isStopped?'rgba(231,76,60,.25)':'var(--border)')+';border-radius:11px;padding:11px 14px;flex-wrap:wrap;transition:border-color .2s">';
+      h += '<div style="background:var(--panel);border:1.5px solid '+borderCol+';border-radius:13px;padding:14px;display:flex;flex-direction:column;gap:10px">';
 
-      // Player avatar + name
-      h += '<div style="display:flex;align-items:center;gap:9px;flex-shrink:0;min-width:130px">';
-      h += '<div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">'+p.emoji+'</div>';
-      h += '<div><div style="font-size:13px;font-weight:700">'+x(p.name)+'</div>';
-      h += '<div style="font-size:10px;color:var(--muted)">'+(p.score||0)+' pts</div></div>';
+      // Top row: player info + scene selector + status
+      h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+
+      // Player info
+      h += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;min-width:110px">';
+      h += '<div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px">'+p.emoji+'</div>';
+      h += '<div><div style="font-size:13px;font-weight:700;color:#fff">'+x(p.name)+'</div>';
+      const stCol = hasStream&&!isStopped?'var(--safe)':hasAssign&&!isStopped?'var(--warn)':'var(--muted)';
+      const stTxt = hasStream&&!isStopped?'● Live':hasAssign&&!isStopped?'⟳ Assigned':isStopped?'⏹ Stopped':'No feed';
+      h += '<div style="font-size:10px;color:'+stCol+';font-weight:700">'+stTxt+'</div></div>';
       h += '</div>';
 
-      // Feed dropdown — populated from live Wirecast shots
-      h += '<select onchange="wcAssignShot(&quot;'+x(p.name)+'&quot;,this.value)" '
-         + 'style="flex:1;min-width:160px;background:var(--panel);border:1px solid '+(hasAssign?'rgba(91,76,255,.6)':'var(--border)')+';border-radius:9px;padding:8px 12px;color:'+(hasAssign?'var(--text)':'var(--muted)')+';font-family:DM Sans,sans-serif;font-size:13px;cursor:pointer;outline:none">';
-      h += '<option value="">— Select Wirecast feed —</option>';
-      shots.forEach(s => {
-        const alreadyUsed = Object.entries(window._wc.assigned).some(([pn, sid]) => sid === s.id && pn !== p.name);
-        h += '<option value="'+x(s.id)+'"'+(assignedId===s.id?' selected':'')+(alreadyUsed?' style="color:var(--muted)"':'')+'>'+x(s.name)+(alreadyUsed?' (in use)':'')+'</option>';
+      // Scene selector
+      h += '<select data-pname="'+x(p.name)+'" onchange="obsAssign(this.dataset.pname,this.value)" ';
+      h += 'style="flex:1;min-width:150px;background:var(--panel);border:1px solid '+(hasAssign?'rgba(91,76,255,.5)':'var(--border)')+';border-radius:9px;padding:7px 11px;color:var(--text);font-family:DM Sans,sans-serif;font-size:13px;cursor:pointer;outline:none">';
+      h += '<option value="">— Select OBS scene —</option>';
+      scenes.forEach(s => {
+        const usedByOther = Object.entries(window._obs.assigned).some(([pn,sn])=>sn===s.name&&pn!==p.name);
+        const sel = s.name===assignedScene?' selected':'';
+        h += '<option value="'+x(s.name)+'"'+sel+(usedByOther?' disabled':'')+'>'+x(s.name)+(usedByOther?' (in use)':'')+'</option>';
       });
       h += '</select>';
 
       // Status badge
-      if(hasAssign && !isStopped){
-        h += '<span style="background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.4);color:var(--safe);font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap">● LIVE</span>';
+      if(hasStream&&!isStopped){
+        h += '<span style="background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.4);color:var(--safe);font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap">● LIVE</span>';
       } else if(isStopped){
-        h += '<span style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);color:var(--danger);font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap">⏹ STOPPED</span>';
-      } else {
-        h += '<span style="background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--muted);font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap">UNASSIGNED</span>';
+        h += '<span style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);color:var(--danger);font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap">⏹ STOPPED</span>';
+      } else if(hasAssign){
+        h += '<span style="background:rgba(245,200,66,.08);border:1px solid rgba(245,200,66,.3);color:var(--gold);font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap">⟳ ASSIGNED</span>';
       }
 
-      // Individual stop / start button — only shown when a feed is assigned
-      if(hasAssign){
+      // Stop / Start button
+      if(hasStream){
         if(isStopped){
-          h += '<button class="btn btn-safe btn-xs" onclick="wcStartFeed(&quot;'+x(p.name)+'&quot;)" style="white-space:nowrap">▶ Start</button>';
+          h += '<button class="btn btn-safe btn-xs" data-pname="'+x(p.name)+'" onclick="obsStart(this.dataset.pname)">▶ Start</button>';
         } else {
-          h += '<button class="btn btn-danger btn-xs" onclick="wcStopFeed(&quot;'+x(p.name)+'&quot;)" style="white-space:nowrap">⏹ Stop</button>';
+          h += '<button class="btn btn-danger btn-xs" data-pname="'+x(p.name)+'" onclick="obsStop(this.dataset.pname)">⏹ Stop</button>';
         }
       }
+      h += '</div>'; // end top row
 
-      h += '</div>'; // end player row
+      // USB camera selector row (always shown when devices detected)
+      if(devices.length > 0){
+        h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+        h += '<span style="font-size:11px;color:var(--muted);white-space:nowrap">USB Camera:</span>';
+        h += '<select data-pname="'+x(p.name)+'" onchange="obsStartCam(this.dataset.pname,this.value)" ';
+        h += 'style="flex:1;min-width:150px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--text);font-family:DM Sans,sans-serif;font-size:12px;cursor:pointer;outline:none">';
+        h += '<option value="">— Select camera device —</option>';
+        devices.forEach(d=>{
+          const lbl = d.label||('Camera '+(devices.indexOf(d)+1));
+          const usedByOther = Object.values(window._obs.streams||{}).some((st,idx)=>{ return false; });
+          h += '<option value="'+d.deviceId+'">'+x(lbl)+'</option>';
+        });
+        h += '</select>';
+        if(hasStream){
+          h += '<button class="btn btn-danger btn-xs" data-pname="'+x(p.name)+'" onclick="obsStopCam(this.dataset.pname)">⏹</button>';
+        }
+        h += '</div>';
+      }
+
+      // Live preview thumbnail
+      if(hasStream && !isStopped){
+        h += '<div style="position:relative;width:100%;padding-top:56.25%;border-radius:9px;overflow:hidden;background:#000">';
+        h += '<video id="obs-prev-'+i+'" autoplay playsinline muted ';
+        h += 'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover"></video>';
+        h += '<div style="position:absolute;top:6px;left:6px;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:2px 7px;border-radius:20px;animation:pulse 2s infinite;font-weight:700">● LIVE</div>';
+        h += '</div>';
+      }
+
+      h += '</div>'; // end player card
     });
     h += '</div>';
 
-    // Stop All / Start All
-    h += '<div style="display:flex;gap:8px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">';
-    h += '<button class="btn btn-safe btn-sm" onclick="wcStartAll()">▶ Start All Feeds</button>';
-    h += '<button class="btn btn-danger btn-sm" onclick="wcStopAll()">⏹ Stop All Feeds</button>';
+    // Global controls
+    h += '<div style="display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">';
+    h += '<button class="btn btn-safe btn-sm" onclick="obsStartAll()">▶ Start All</button>';
+    h += '<button class="btn btn-danger btn-sm" onclick="obsStopAll()">⏹ Stop All</button>';
     h += '</div>';
   }
   h += '</div>';
 
-  // ── How it works tip ──
+  // ── Tips ──
   h += '<div style="background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.2);border-radius:12px;padding:14px 18px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">💡 How it works</div>';
-  h += '<div style="font-size:13px;color:var(--muted);line-height:1.8">';
-  h += 'Wirecast captures all camera feeds at once as separate <b style="color:var(--text)">shots</b>. ';
-  h += 'Once connected, this app fetches the shot list automatically — no manual entry needed. ';
-  h += 'Select a shot for each player, and use the individual <b style="color:var(--text)">Stop</b> buttons or <b style="color:var(--text)">Stop All</b> to cut feeds at any time.';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">💡 Setup Guide</div>';
+  h += '<div style="font-size:13px;color:var(--muted);line-height:1.9">';
+  h += '1. In OBS: <b style="color:var(--text)">Tools → WebSocket Server Settings</b> → Enable Server<br>';
+  h += '2. Add one <b style="color:var(--text)">Scene</b> per player in OBS (e.g. "Player 1", "Player 2")<br>';
+  h += '3. Add the player&#39;s camera as a <b style="color:var(--text)">Video Capture Device</b> source in each scene<br>';
+  h += '4. Click <b style="color:var(--text)">Connect & Fetch Scenes</b> — scenes appear automatically<br>';
+  h += '5. Assign each scene to its player<br>';
+  h += '6. Click <b style="color:var(--text)">Detect USB Cameras</b> and assign the camera device to each player for live preview';
   h += '</div>';
   h += '</div>';
 
   document.getElementById('ap-cameras').innerHTML = h;
+
+  // Wire preview videos
+  S.players.forEach((p,i)=>{
+    const vid = document.getElementById('obs-prev-'+i);
+    const st  = window._obs.streams && window._obs.streams[p.name];
+    if(vid && st instanceof MediaStream){
+      vid.srcObject = st;
+      vid.play().catch(()=>{});
+    }
+  });
 }
 
-function setMain(card, name){ toast(name+' set as main feed.','nf'); }
+function setMain(card,name){ toast(name+' set as main feed.','nf'); }
+
 
 // ═══ LEADERBOARD ═══
 
