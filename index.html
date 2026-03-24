@@ -534,7 +534,6 @@ body { overflow-x: hidden; min-width: 0; }
       </div>
       <div class="emsg" id="ec" style="text-align:center;margin-bottom:12px;font-size:13px">❌ Incorrect username or password.</div>
       <button class="btn btn-primary btn-block" onclick="doLogin()">Sign In →</button>
-      <div style="text-align:center;margin-top:15px;font-size:12px;color:var(--muted);line-height:1.8">Default: <code style="background:var(--panel);padding:2px 6px;border-radius:4px;font-family:'Space Mono',monospace;font-size:10px">Admin</code> / <code style="background:var(--panel);padding:2px 6px;border-radius:4px;font-family:'Space Mono',monospace;font-size:10px">P@55w0rd</code></div>
     </div>
   </div>
 </div>
@@ -663,6 +662,7 @@ body { overflow-x: hidden; min-width: 0; }
       <div class="anav" onclick="aTab('scores',this)"><span>🏆</span>Leaderboard</div>
       <div class="aslbl">System</div>
       <div class="anav" onclick="aTab('arch',this)"><span>🏗️</span>Architecture</div>
+      <div class="anav" onclick="aTab('account',this)"><span>⚙️</span>Account</div>
     </div>
     <div class="acont">
       <div id="ap-overview" class="apage on"></div>
@@ -671,6 +671,7 @@ body { overflow-x: hidden; min-width: 0; }
       <div id="ap-cameras" class="apage"></div>
       <div id="ap-scores" class="apage"></div>
       <div id="ap-arch" class="apage"></div>
+      <div id="ap-account" class="apage"></div>
     </div>
   </div>
 </div>
@@ -987,7 +988,8 @@ function doLogin(){
   const u=document.getElementById('fu').value.trim(), p=document.getElementById('fp').value;
   if(!u){showE('eu');addE('fu');return;}
   if(!p){showE('ep');addE('fp');return;}
-  if(u!==AU||p!==AP){showE('ec');addE('fu');addE('fp');return;}
+  const _creds = _getStoredCreds();
+  if(u!==_creds.username||p!==_creds.password){showE('ec');addE('fu');addE('fp');return;}
   S.ain=true;
   localStorage.setItem('qs_admin','1');
   const chip=document.getElementById('achip');chip.style.display='flex';
@@ -1014,7 +1016,7 @@ function aTab(tab,el){
   if(el) el.classList.add('on');
   // When switching to cameras tab, poll camera devices immediately
   if(tab==='cameras' && _bc) _bc.postMessage({ type: 'admin-poll' });
-  const renders={overview:renderOverview,quizzes:renderQL,session:renderSession,cameras:renderCameras,scores:renderScores,arch:renderArch};
+  const renders={overview:renderOverview,quizzes:renderQL,session:renderSession,cameras:renderCameras,scores:renderScores,arch:renderArch,account:renderAccount};
   if(renders[tab]) renders[tab]();
 }
 
@@ -3087,216 +3089,228 @@ function toggleReveal(){
   toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
 
-// ═══ CAMERAS — vMix Integration ═══
-// vMix exposes HTTP preview endpoints per input.
-// Admin sets the vMix host IP and assigns an input number per player.
-// Feeds are shown as <img> polling vMix's JPEG preview endpoint:
-//   http://<host>/api/snapshot/<inputNumber>   (MJPEG snapshot)
-// or vMix web controller embed:
-//   http://<host>/preview/<inputNumber>
-// Admin can stop individual feeds or all at once.
+// ═══ CAMERAS — OBS Studio Integration ═══
+// OBS captures ALL feeds. It outputs them as separate scenes (one per player).
+// The admin enters ONE OBS base URL, then assigns a scene name to each player.
+// OBS must have the obs-websocket plugin OR be running a local HTTP output.
+//
+// Recommended OBS setup for this app:
+//   1. Create one Scene per player (e.g. "Player 1", "Player 2", etc.)
+//   2. Enable Tools → obs-websocket server (port 4455) — optional, for scene list
+//   3. Use an MJPEG output plugin (obs-browser or ffmpeg pipe) so each scene
+//      is accessible at: http://<obs-host>:<port>/scene/<scene-name>
+//      OR configure OBS to output one scene at a time via Virtual Camera.
+//
+// Simplest practical setup (no extra plugins needed):
+//   • In OBS: set up one scene per player, then use the Projector output
+//     or a local RTMP/HLS relay. The admin enters the base URL once,
+//     then picks which scene name maps to each player.
+//
+// The feed URL per player = baseUrl + sceneName (URL-encoded).
 
-if(!window._vmix) window._vmix = {
-  host: '',          // e.g. "192.168.1.100" or "192.168.1.100:8088"
-  inputs: {},        // { playerName: inputNumber }
-  stopped: {}        // { playerName: true } — manually stopped feeds
+if(!window._obs) window._obs = {
+  baseUrl:  '',   // e.g. "http://192.168.1.x:8080"
+  scenes:   [],   // list of known scene names, fetched or entered manually
+  assigned: {},   // { playerName: sceneName }
+  stopped:  {}    // { playerName: true }
 };
 
-function vmixSaveSettings(){
-  try { localStorage.setItem('qs_vmix', JSON.stringify(window._vmix)); } catch(e){}
+function obsSaveSettings(){
+  try { localStorage.setItem('qs_obs', JSON.stringify(window._obs)); } catch(e){}
 }
-function vmixLoadSettings(){
+function obsLoadSettings(){
   try {
-    const raw = localStorage.getItem('qs_vmix');
-    if(raw){ const p=JSON.parse(raw); if(p) window._vmix = Object.assign(window._vmix, p); }
+    const raw = localStorage.getItem('qs_obs');
+    if(raw){ const p=JSON.parse(raw); if(p) window._obs = Object.assign({baseUrl:'',scenes:[],assigned:{},stopped:{}}, p); }
   } catch(e){}
 }
-vmixLoadSettings();
+obsLoadSettings();
 
-function vmixFeedUrl(playerName){
-  const h = window._vmix.host.trim();
-  if(!h) return '';
-  const input = window._vmix.inputs[playerName];
-  if(!input) return '';
-  const host = h.startsWith('http') ? h : 'http://'+h;
-  // vMix snapshot endpoint — returns JPEG, updated ~10fps
-  return host+'/api/snapshot/'+encodeURIComponent(input);
+// Build the preview URL for a player based on their assigned scene
+function obsFeedUrl(playerName){
+  const base  = (window._obs.baseUrl || '').trim().replace(/\/+$/,'');
+  const scene = (window._obs.assigned[playerName] || '').trim();
+  if(!base || !scene) return '';
+  // Standard MJPEG-over-HTTP path: base/scene/sceneName
+  return base + '/' + encodeURIComponent(scene);
 }
 
-function vmixStopFeed(playerName){
-  window._vmix.stopped[playerName] = true;
-  vmixSaveSettings();
-  renderCameras();
+function obsStopFeed(playerName){
+  window._obs.stopped[playerName] = true;
+  obsSaveSettings(); renderCameras();
   toast('Feed stopped: '+playerName,'nf');
 }
-function vmixStartFeed(playerName){
-  delete window._vmix.stopped[playerName];
-  vmixSaveSettings();
-  renderCameras();
+function obsStartFeed(playerName){
+  delete window._obs.stopped[playerName];
+  obsSaveSettings(); renderCameras();
   toast('Feed started: '+playerName,'ok');
 }
-function vmixStopAll(){
-  S.players.forEach(p => { window._vmix.stopped[p.name] = true; });
-  vmixSaveSettings();
-  renderCameras();
+function obsStopAll(){
+  S.players.forEach(p => { window._obs.stopped[p.name] = true; });
+  obsSaveSettings(); renderCameras();
   toast('All feeds stopped.','nf');
 }
-function vmixStartAll(){
-  window._vmix.stopped = {};
-  vmixSaveSettings();
-  renderCameras();
+function obsStartAll(){
+  window._obs.stopped = {};
+  obsSaveSettings(); renderCameras();
   toast('All feeds started.','ok');
 }
-function vmixSaveHost(){
-  const el = document.getElementById('vmix-host-inp');
-  if(el){ window._vmix.host = el.value.trim(); vmixSaveSettings(); }
+function obsSaveBase(){
+  const el = document.getElementById('obs-base-inp');
+  if(el){ window._obs.baseUrl = el.value.trim().replace(/\/+$/,''); obsSaveSettings(); }
   renderCameras();
-  toast('vMix host saved.','ok');
+  toast('OBS base URL saved.','ok');
 }
-function vmixSaveInput(playerName){
-  const key = 'vmix-inp-'+playerName.replace(/\s/g,'_');
-  const el = document.getElementById(key);
-  if(el){ window._vmix.inputs[playerName] = el.value.trim(); vmixSaveSettings(); }
-  renderCameras();
+function obsAddScene(){
+  const el = document.getElementById('obs-scene-inp');
+  if(!el) return;
+  const name = el.value.trim();
+  if(!name){ toast('Enter a scene name.','er'); return; }
+  if(!window._obs.scenes.includes(name)) window._obs.scenes.push(name);
+  el.value = '';
+  obsSaveSettings(); renderCameras();
+}
+function obsRemoveScene(name){
+  window._obs.scenes = window._obs.scenes.filter(s => s !== name);
+  // Unassign any players using this scene
+  Object.keys(window._obs.assigned).forEach(p => {
+    if(window._obs.assigned[p] === name) delete window._obs.assigned[p];
+  });
+  obsSaveSettings(); renderCameras();
+}
+function obsAssignScene(playerName, sceneName){
+  if(sceneName) window._obs.assigned[playerName] = sceneName;
+  else delete window._obs.assigned[playerName];
+  obsSaveSettings(); renderCameras();
 }
 
 function renderCameras(){
   const n = S.players.length;
+  const scenes = window._obs.scenes || [];
+  const base   = window._obs.baseUrl || '';
 
-  let h = '<div class="ptitle">Camera Feeds — vMix</div>';
+  let h = '<div class="ptitle">Camera Feeds — OBS Studio</div>';
 
-  // ── vMix host settings ──
-  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:18px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:10px">📡 vMix Connection</div>';
-  h += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
-  h += '<input id="vmix-host-inp" class="ifield" placeholder="e.g. 192.168.1.100  or  192.168.1.100:8088" '
-     + 'value="'+x(window._vmix.host)+'" '
-     + 'style="flex:1;min-width:220px;font-family:Space Mono,monospace;font-size:13px">';
-  h += '<button class="btn btn-primary btn-sm" onclick="vmixSaveHost()">💾 Save Host</button>';
+  // ── Step 1: OBS base URL ──
+  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:12px">📡 Step 1 — OBS Output URL</div>';
+  h += '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;line-height:1.6">Enter the base URL of your OBS HTTP output (e.g. a local MJPEG server or HLS relay running on the same machine as OBS).</div>';
+  h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+  h += '<input id="obs-base-inp" class="ifield" '
+     + 'placeholder="http://192.168.1.x:8080" '
+     + 'value="'+x(base)+'" '
+     + 'style="flex:1;min-width:200px;font-family:Space Mono,monospace;font-size:13px">';
+  h += '<button class="btn btn-primary btn-sm" onclick="obsSaveBase()">💾 Save</button>';
   h += '</div>';
-  const testUrl = window._vmix.host ? ('http://'+(window._vmix.host.startsWith('http')?window._vmix.host.replace(/^https?:\/\//,''):window._vmix.host)+'/api') : '';
-  if(testUrl){
-    h += '<div style="margin-top:8px;font-size:11px;color:var(--muted)">API endpoint: <code style="color:var(--accent);font-family:Space Mono,monospace">'+x(testUrl)+'</code></div>';
+  if(base){
+    h += '<div style="margin-top:7px;font-size:11px;color:var(--muted)">Base URL: <code style="color:var(--accent);font-family:Space Mono,monospace">'+x(base)+'</code></div>';
   }
   h += '</div>';
 
-  // ── Global feed controls ──
-  if(n > 0){
-    h += '<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
-    h += '<button class="btn btn-safe btn-sm" onclick="vmixStartAll()">▶ Start All Feeds</button>';
-    h += '<button class="btn btn-danger btn-sm" onclick="vmixStopAll()">⏹ Stop All Feeds</button>';
-    h += '</div>';
-  }
+  // ── Step 2: OBS Scenes list ──
+  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:12px">🎬 Step 2 — OBS Scene Names</div>';
+  h += '<div style="font-size:13px;color:var(--muted);margin-bottom:12px;line-height:1.6">Add the exact scene names from your OBS session — one per player camera. These will appear as options when assigning feeds below.</div>';
 
-  if(!n){
-    h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:36px;text-align:center;color:var(--muted)">';
-    h += '<div style="font-size:32px;margin-bottom:10px">📹</div>';
-    h += '<div style="font-size:15px;font-weight:600;margin-bottom:5px">No Players Yet</div>';
-    h += '<div style="font-size:13px">Players appear here once they join. Assign a vMix input number to each one.</div>';
+  if(scenes.length){
+    h += '<div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px">';
+    scenes.forEach(s => {
+      h += '<div style="display:flex;align-items:center;gap:6px;background:rgba(91,76,255,.1);border:1px solid rgba(91,76,255,.3);border-radius:8px;padding:5px 10px">';
+      h += '<span style="font-family:Space Mono,monospace;font-size:12px;color:var(--accent)">'+x(s)+'</span>';
+      h += '<button onclick="obsRemoveScene(&quot;'+x(s)+'&quot;)" '
+         + 'style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:13px;line-height:1;padding:0 2px" title="Remove">✕</button>';
+      h += '</div>';
+    });
     h += '</div>';
   } else {
-    h += '<div class="feed-grid">';
-    S.players.forEach((p, i) => {
-      const inputNum = window._vmix.inputs[p.name] || '';
-      const isStopped = !!window._vmix.stopped[p.name];
-      const feedUrl = isStopped ? '' : vmixFeedUrl(p.name);
-      const hasInput = !!(inputNum && window._vmix.host);
-      const inputKey = 'vmix-inp-'+p.name.replace(/\s/g,'_');
-
-      h += '<div class="fcard" style="cursor:default">';
-
-      // Feed preview area
-      h += '<div class="fvid" style="position:relative;overflow:hidden;background:#0a0a14">';
-      if(feedUrl && !isStopped){
-        // Polling <img> from vMix snapshot endpoint — src is refreshed by JS
-        h += '<img id="vmix-img-'+i+'" src="'+x(feedUrl)+'" '
-           + 'data-src="'+x(feedUrl)+'" '
-           + 'data-player="'+x(p.name)+'" '
-           + 'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1" '
-           + 'onerror="document.getElementById(&quot;vmix-err-'+i+'&quot;).style.display=&quot;flex&quot;;this.style.opacity=0" '
-           + 'onload="document.getElementById(&quot;vmix-err-'+i+'&quot;).style.display=&quot;none&quot;;this.style.opacity=1">';
-        h += '<div id="vmix-err-'+i+'" style="display:none;position:absolute;inset:0;z-index:2;align-items:center;justify-content:center;flex-direction:column;gap:6px;color:var(--danger);font-size:12px">';
-        h += '<div style="font-size:28px">⚠️</div><div>Cannot reach vMix</div><div style="font-size:10px;color:var(--muted)">Check host and input number</div></div>';
-        // LIVE badge
-        h += '<div style="position:absolute;top:7px;left:7px;z-index:3;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 8px;border-radius:20px;animation:pulse 2s infinite">● LIVE</div>';
-        if(i===0) h += '<div style="position:absolute;top:7px;right:7px;z-index:3;background:var(--gold);color:var(--deep);font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px">MAIN</div>';
-      } else if(isStopped){
-        h += '<div style="position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--muted)">';
-        h += '<div style="font-size:34px">⏹</div>';
-        h += '<div style="font-size:12px">Feed stopped</div>';
-        h += '</div>';
-      } else {
-        h += '<div style="position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--muted)">';
-        h += '<div style="font-size:38px">'+p.emoji+'</div>';
-        h += '<div style="font-size:11px">'+(hasInput?'Connecting…':'No input assigned')+'</div>';
-        h += '</div>';
-      }
-      h += '</div>'; // end fvid
-
-      // Player info + controls
-      h += '<div style="padding:10px 12px">';
-      h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">';
-      h += '<div style="font-size:13px;font-weight:700">'+x(p.name)+'</div>';
-      h += '<span style="font-family:Space Mono,monospace;font-size:11px;color:var(--gold)">'+(p.score||0)+' pts</span>';
-      h += '</div>';
-
-      // vMix input number field
-      h += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">';
-      h += '<label style="font-size:10px;color:var(--muted);white-space:nowrap;letter-spacing:.5px">INPUT #</label>';
-      h += '<input id="'+inputKey+'" type="text" '
-         + 'value="'+x(inputNum)+'" '
-         + 'placeholder="e.g. 1 or 2" '
-         + 'oninput="vmixSaveInput(&quot;'+x(p.name)+'&quot;)" '
-         + 'style="flex:1;background:var(--panel);border:1px solid var(--border);border-radius:7px;padding:5px 9px;color:var(--text);font-family:Space Mono,monospace;font-size:12px;outline:none">';
-      h += '</div>';
-
-      // Stop/start button
-      h += '<div style="display:flex;gap:6px">';
-      if(isStopped){
-        h += '<button class="btn btn-safe btn-sm" style="flex:1;justify-content:center" onclick="vmixStartFeed(&quot;'+x(p.name)+'&quot;)">▶ Start Feed</button>';
-      } else {
-        h += '<button class="btn btn-danger btn-sm" style="flex:1;justify-content:center" onclick="vmixStopFeed(&quot;'+x(p.name)+'&quot;)">⏹ Stop Feed</button>';
-      }
-      h += '</div>';
-      h += '</div>'; // end padding
-      h += '</div>'; // end fcard
-    });
-    h += '</div>'; // end feed-grid
+    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;margin-bottom:12px">No scenes added yet.</div>';
   }
 
-  // Instructions
-  h += '<div style="background:rgba(91,76,255,.06);border:1px solid rgba(91,76,255,.18);border-radius:12px;padding:14px 18px;margin-top:18px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">📋 Setup Guide</div>';
+  h += '<div style="display:flex;gap:8px">';
+  h += '<input id="obs-scene-inp" class="ifield" placeholder="e.g. Player 1 Cam" '
+     + 'onkeydown="if(event.key===&quot;Enter&quot;)obsAddScene()" '
+     + 'style="flex:1;font-size:13px">';
+  h += '<button class="btn btn-primary btn-sm" onclick="obsAddScene()">＋ Add Scene</button>';
+  h += '</div>';
+  h += '</div>';
+
+  // ── Step 3: Assign scenes to players ──
+  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:12px">🎯 Step 3 — Assign Feeds to Players</div>';
+
+  if(!n){
+    h += '<div style="font-size:13px;color:var(--muted);font-style:italic">No players have joined yet. Assignments will appear here once players join the game.</div>';
+  } else if(!scenes.length){
+    h += '<div style="font-size:13px;color:var(--warn)">⚠️ Add at least one OBS scene name in Step 2 before assigning feeds.</div>';
+  } else {
+    h += '<div style="display:flex;flex-direction:column;gap:9px">';
+    S.players.forEach((p, i) => {
+      const assigned  = window._obs.assigned[p.name] || '';
+      const isStopped = !!window._obs.stopped[p.name];
+      const hasAssign = !!assigned;
+      const selId     = 'obs-sel-'+i;
+
+      h += '<div style="display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--border);border-radius:11px;padding:11px 14px;flex-wrap:wrap">';
+
+      // Player avatar + name
+      h += '<div style="display:flex;align-items:center;gap:9px;flex-shrink:0;min-width:130px">';
+      h += '<div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">'+p.emoji+'</div>';
+      h += '<div><div style="font-size:13px;font-weight:700">'+x(p.name)+'</div>';
+      h += '<div style="font-size:10px;color:var(--muted)">'+(p.score||0)+' pts</div></div>';
+      h += '</div>';
+
+      // Scene selector dropdown
+      h += '<select id="'+selId+'" '
+         + 'onchange="obsAssignScene(&quot;'+x(p.name)+'&quot;,this.value)" '
+         + 'style="flex:1;min-width:160px;background:var(--panel);border:1px solid '+(hasAssign?'rgba(91,76,255,.6)':'var(--border)')+';border-radius:9px;padding:8px 12px;color:'+(hasAssign?'var(--text)':'var(--muted)')+';font-family:DM Sans,sans-serif;font-size:13px;cursor:pointer;outline:none">';
+      h += '<option value="">— Select OBS scene —</option>';
+      scenes.forEach(s => {
+        h += '<option value="'+x(s)+'"'+(assigned===s?' selected':'')+'>'+x(s)+'</option>';
+      });
+      h += '</select>';
+
+      // Status badge
+      if(hasAssign && !isStopped){
+        h += '<span style="background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.4);color:var(--safe);font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap">● LIVE</span>';
+      } else if(isStopped){
+        h += '<span style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);color:var(--danger);font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap">⏹ STOPPED</span>';
+      } else {
+        h += '<span style="background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--muted);font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;white-space:nowrap">NOT ASSIGNED</span>';
+      }
+
+      // Stop/Start toggle
+      if(hasAssign){
+        if(isStopped){
+          h += '<button class="btn btn-safe btn-xs" onclick="obsStartFeed(&quot;'+x(p.name)+'&quot;)">▶ Start</button>';
+        } else {
+          h += '<button class="btn btn-danger btn-xs" onclick="obsStopFeed(&quot;'+x(p.name)+'&quot;)">⏹ Stop</button>';
+        }
+      }
+
+      h += '</div>';
+    });
+    h += '</div>';
+
+    // Global controls
+    h += '<div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">';
+    h += '<button class="btn btn-safe btn-sm" onclick="obsStartAll()">▶ Start All</button>';
+    h += '<button class="btn btn-danger btn-sm" onclick="obsStopAll()">⏹ Stop All</button>';
+    h += '</div>';
+  }
+  h += '</div>';
+
+  // ── Setup note ──
+  h += '<div style="background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.2);border-radius:12px;padding:14px 18px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">💡 How it works</div>';
   h += '<div style="font-size:13px;color:var(--muted);line-height:1.8">';
-  h += '<b style="color:var(--text)">1.</b> In vMix Pro, go to <b style="color:var(--text)">Settings → Web Controller</b> and note the port (default 8088).<br>';
-  h += '<b style="color:var(--text)">2.</b> Enter your vMix machine&#39;s IP address above (same network).<br>';
-  h += '<b style="color:var(--text)">3.</b> Assign an input number to each player — matches the input number in your vMix session.<br>';
-  h += '<b style="color:var(--text)">4.</b> The feed previews update automatically. Use the projector screen to display full feeds.';
-  h += '</div></div>';
+  h += 'OBS captures all camera feeds simultaneously as separate <b style="color:var(--text)">Scenes</b>. ';
+  h += 'Set up one Scene per player in OBS, then use the selectors above to assign each Scene to its player. ';
+  h += 'When the game runs, the projector screen will pull each player&#39;s assigned OBS scene feed. ';
+  h += 'Use <b style="color:var(--text)">Stop</b> to cut an individual feed at any time without affecting the others.';
+  h += '</div>';
+  h += '</div>';
 
   document.getElementById('ap-cameras').innerHTML = h;
-
-  // Start polling all active feeds (refresh img src every 200ms for smooth preview)
-  _vmixStartPolling();
-}
-
-// Poll vMix snapshot endpoints to refresh preview images
-let _vmixPollInterval = null;
-function _vmixStartPolling(){
-  if(_vmixPollInterval) clearInterval(_vmixPollInterval);
-  if(!window._vmix.host) return;
-  _vmixPollInterval = setInterval(() => {
-    S.players.forEach((p, i) => {
-      if(window._vmix.stopped[p.name]) return;
-      const feedUrl = vmixFeedUrl(p.name);
-      if(!feedUrl) return;
-      const img = document.getElementById('vmix-img-'+i);
-      if(img){
-        // Append timestamp to bust cache
-        img.src = feedUrl + '?t='+Date.now();
-      }
-    });
-  }, 200);
 }
 
 function setMain(card, name){ toast(name+' set as main feed.','nf'); }
@@ -3492,6 +3506,163 @@ function renderArch(){
   h+='</div>';
   document.getElementById('ap-arch').innerHTML=h;
 }
+
+// ═══ ACCOUNT SETTINGS ═══
+// Credentials persisted in localStorage under 'qs_creds'.
+// Falls back to the compile-time AU/AP constants on first load.
+function _getStoredCreds(){
+  try {
+    const raw = localStorage.getItem('qs_creds');
+    if(raw){ const p=JSON.parse(raw); if(p&&p.username&&p.password) return p; }
+  } catch(e){}
+  return { username: AU, password: AP, displayName: 'Administrator' };
+}
+function _saveCreds(obj){
+  try { localStorage.setItem('qs_creds', JSON.stringify(obj)); } catch(e){}
+}
+
+function renderAccount(){
+  const creds = _getStoredCreds();
+  let h = '<div class="ptitle">Account Settings</div>';
+
+  // ── Profile card ──
+  h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;margin-bottom:18px;display:flex;align-items:center;gap:18px">';
+  h += '<div style="width:64px;height:64px;border-radius:16px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:28px;flex-shrink:0">👑</div>';
+  h += '<div>';
+  h += '<div style="font-family:Bebas Neue,cursive;font-size:22px;letter-spacing:1px;color:var(--gold)">'+x(creds.displayName||creds.username)+'</div>';
+  h += '<div style="font-size:12px;color:var(--muted);margin-top:3px">@'+x(creds.username)+' · Administrator</div>';
+  h += '</div>';
+  h += '</div>';
+
+  // ── Change Display Name ──
+  h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:14px">✏️ Display Name</div>';
+  h += '<div class="ig" style="margin-bottom:12px">';
+  h += '<label class="lbl">Name shown in the admin dashboard</label>';
+  h += '<input class="ifield" id="acc-dname" type="text" value="'+x(creds.displayName||creds.username)+'" placeholder="e.g. Quiz Master" maxlength="40">';
+  h += '</div>';
+  h += '<button class="btn btn-primary btn-sm" onclick="accSaveName()">💾 Save Display Name</button>';
+  h += '</div>';
+
+  // ── Change Username ──
+  h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:14px">👤 Change Username</div>';
+  h += '<div class="ig" style="margin-bottom:6px">';
+  h += '<label class="lbl">New Username</label>';
+  h += '<input class="ifield" id="acc-uname" type="text" placeholder="Enter new username" maxlength="40">';
+  h += '<div class="emsg" id="acc-uname-err" style="display:none">Username cannot be empty.</div>';
+  h += '</div>';
+  h += '<div class="ig" style="margin-bottom:12px">';
+  h += '<label class="lbl">Current Password (to confirm)</label>';
+  h += '<div class="pw-wrap"><input class="ifield" id="acc-uname-pw" type="password" placeholder="Enter current password"><button class="eye-btn" onclick="accTogglePw(&quot;acc-uname-pw&quot;)" type="button">👁</button></div>';
+  h += '<div class="emsg" id="acc-uname-pw-err" style="display:none">Incorrect password.</div>';
+  h += '</div>';
+  h += '<button class="btn btn-primary btn-sm" onclick="accSaveUsername()">💾 Save Username</button>';
+  h += '</div>';
+
+  // ── Change Password ──
+  h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:14px">🔑 Change Password</div>';
+  h += '<div class="ig" style="margin-bottom:6px">';
+  h += '<label class="lbl">Current Password</label>';
+  h += '<div class="pw-wrap"><input class="ifield" id="acc-cur-pw" type="password" placeholder="Current password"><button class="eye-btn" onclick="accTogglePw(&quot;acc-cur-pw&quot;)" type="button">👁</button></div>';
+  h += '<div class="emsg" id="acc-cur-pw-err" style="display:none">Incorrect current password.</div>';
+  h += '</div>';
+  h += '<div class="ig" style="margin-bottom:6px">';
+  h += '<label class="lbl">New Password</label>';
+  h += '<div class="pw-wrap"><input class="ifield" id="acc-new-pw" type="password" placeholder="New password (min 6 chars)"><button class="eye-btn" onclick="accTogglePw(&quot;acc-new-pw&quot;)" type="button">👁</button></div>';
+  h += '<div class="emsg" id="acc-new-pw-err" style="display:none">Password must be at least 6 characters.</div>';
+  h += '</div>';
+  h += '<div class="ig" style="margin-bottom:12px">';
+  h += '<label class="lbl">Confirm New Password</label>';
+  h += '<div class="pw-wrap"><input class="ifield" id="acc-conf-pw" type="password" placeholder="Repeat new password"><button class="eye-btn" onclick="accTogglePw(&quot;acc-conf-pw&quot;)" type="button">👁</button></div>';
+  h += '<div class="emsg" id="acc-conf-pw-err" style="display:none">Passwords do not match.</div>';
+  h += '</div>';
+  h += '<button class="btn btn-primary btn-sm" onclick="accSavePassword()">🔑 Update Password</button>';
+  h += '</div>';
+
+  // ── Session / Security info ──
+  h += '<div style="background:rgba(231,76,60,.06);border:1px solid rgba(231,76,60,.2);border-radius:14px;padding:18px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:10px">🔒 Security</div>';
+  h += '<div style="font-size:13px;color:var(--muted);line-height:1.8">';
+  h += '• Credentials are stored locally on this device.<br>';
+  h += '• Changing username or password takes effect on the next login.<br>';
+  h += '• You will not be logged out when saving changes.';
+  h += '</div>';
+  h += '<div style="margin-top:14px">';
+  h += '<button class="btn btn-danger btn-sm" onclick="accSignOut()">🚪 Sign Out</button>';
+  h += '</div>';
+  h += '</div>';
+
+  document.getElementById('ap-account').innerHTML = h;
+}
+
+// ── Account action handlers ──
+function accTogglePw(id){
+  const f = document.getElementById(id);
+  if(f) f.type = f.type==='password' ? 'text' : 'password';
+}
+
+function accSaveName(){
+  const el = document.getElementById('acc-dname');
+  if(!el) return;
+  const name = el.value.trim();
+  if(!name){ toast('Display name cannot be empty.','er'); return; }
+  const creds = _getStoredCreds();
+  creds.displayName = name;
+  _saveCreds(creds);
+  toast('Display name updated to "'+name+'"','ok');
+  renderAccount();
+}
+
+function accSaveUsername(){
+  const unEl  = document.getElementById('acc-uname');
+  const pwEl  = document.getElementById('acc-uname-pw');
+  const unErr = document.getElementById('acc-uname-err');
+  const pwErr = document.getElementById('acc-uname-pw-err');
+  if(unErr) unErr.style.display='none';
+  if(pwErr) pwErr.style.display='none';
+  const newU = unEl ? unEl.value.trim() : '';
+  const curP = pwEl ? pwEl.value : '';
+  const creds = _getStoredCreds();
+  let ok = true;
+  if(!newU){ if(unErr) unErr.style.display='block'; ok=false; }
+  if(curP !== creds.password){ if(pwErr) pwErr.style.display='block'; ok=false; }
+  if(!ok) return;
+  creds.username = newU;
+  _saveCreds(creds);
+  toast('Username changed to "'+newU+'"','ok');
+  renderAccount();
+}
+
+function accSavePassword(){
+  const curEl   = document.getElementById('acc-cur-pw');
+  const newEl   = document.getElementById('acc-new-pw');
+  const confEl  = document.getElementById('acc-conf-pw');
+  const curErr  = document.getElementById('acc-cur-pw-err');
+  const newErr  = document.getElementById('acc-new-pw-err');
+  const confErr = document.getElementById('acc-conf-pw-err');
+  [curErr,newErr,confErr].forEach(e=>{ if(e) e.style.display='none'; });
+  const cur  = curEl  ? curEl.value  : '';
+  const nw   = newEl  ? newEl.value  : '';
+  const conf = confEl ? confEl.value : '';
+  const creds = _getStoredCreds();
+  let ok = true;
+  if(cur !== creds.password){ if(curErr)  curErr.style.display='block';  ok=false; }
+  if(nw.length < 6)          { if(newErr)  newErr.style.display='block';  ok=false; }
+  if(nw !== conf)            { if(confErr) confErr.style.display='block'; ok=false; }
+  if(!ok) return;
+  creds.password = nw;
+  _saveCreds(creds);
+  toast('Password updated successfully.','ok');
+  // Clear fields
+  [curEl,newEl,confEl].forEach(e=>{ if(e) e.value=''; });
+}
+
+function accSignOut(){
+  doLogout();
+}
+
 
 function renderJoin(){
   ['ejcode','ejname','ejwrong'].forEach(hideE);
