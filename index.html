@@ -3319,57 +3319,48 @@ function renderCameras(){
       const viewUrl  = vdoViewUrl(p.name);
       const isLive   = hasRoom && !stopped;
       const borderCol= isLive?'rgba(46,204,113,.5)':stopped?'rgba(231,76,60,.3)':'var(--border)';
+      const stCol    = isLive?'var(--safe)':stopped?'var(--danger)':'var(--muted)';
+      const stTxt    = isLive?'● Live':'⏹ Stopped';
 
-      h += '<div style="background:var(--card);border:1.5px solid '+borderCol+';border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px">';
+      // Single clean row: avatar | name+status | push link | copy | stop/start | thumbnail
+      h += '<div style="background:var(--card);border:1.5px solid '+borderCol+';border-radius:12px;padding:11px 14px;display:flex;align-items:center;gap:11px;flex-wrap:nowrap">';
 
-      // ── Top row: player info + status + controls ──
-      h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
-      h += '<div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">'+p.emoji+'</div>';
-      h += '<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;color:#fff">'+x(p.name)+'</div>';
-      const stCol=isLive?'var(--safe)':stopped?'var(--danger)':'var(--muted)';
-      const stTxt=isLive?'● Live feed active':stopped?'⏹ Feed stopped':'⟳ Waiting for push';
-      h += '<div style="font-size:11px;color:'+stCol+';font-weight:700;margin-top:1px">'+stTxt+'</div></div>';
+      // Player avatar
+      h += '<div style="width:36px;height:36px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">'+p.emoji+'</div>';
 
-      // Stop / Start button
+      // Name + status
+      h += '<div style="min-width:0;flex-shrink:0;width:120px">';
+      h += '<div style="font-size:13px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+x(p.name)+'</div>';
+      h += '<div style="font-size:10px;color:'+stCol+';font-weight:700;margin-top:1px">'+stTxt+'</div>';
+      h += '</div>';
+
+      // Push link + copy — takes remaining space
+      h += '<div style="flex:1;min-width:0;display:flex;align-items:center;gap:7px;overflow:hidden">';
+      h += '<code style="flex:1;font-size:10px;color:var(--accent);font-family:Space Mono,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+x(pushUrl)+'</code>';
+      h += '<button class="btn btn-outline btn-xs" data-url="'+x(pushUrl)+'" onclick="vdoCopyLink(this.dataset.url)" style="flex-shrink:0">📋</button>';
+      h += '</div>';
+
+      // Stop / Start
       if(stopped){
-        h += '<button class="btn btn-safe btn-sm" data-pname="'+x(p.name)+'" onclick="vdoStart(this.dataset.pname)">▶ Start</button>';
+        h += '<button class="btn btn-safe btn-xs" data-pname="'+x(p.name)+'" onclick="vdoStart(this.dataset.pname)" style="flex-shrink:0">▶</button>';
       } else {
-        h += '<button class="btn btn-danger btn-sm" data-pname="'+x(p.name)+'" onclick="vdoStop(this.dataset.pname)">⏹ Stop</button>';
+        h += '<button class="btn btn-danger btn-xs" data-pname="'+x(p.name)+'" onclick="vdoStop(this.dataset.pname)" style="flex-shrink:0">⏹</button>';
       }
-      h += '</div>';
 
-      // ── Push link row ──
-      h += '<div style="background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);border-radius:9px;padding:10px 13px">';
-      h += '<div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:6px">📱 Phone Push Link — share with '+x(p.name)+'</div>';
-      h += '<div style="display:flex;align-items:center;gap:8px">';
-      h += '<code style="flex:1;font-size:11px;color:var(--accent);font-family:Space Mono,monospace;word-break:break-all;line-height:1.5">'+x(pushUrl)+'</code>';
-      h += '<button class="btn btn-outline btn-xs" data-url="'+x(pushUrl)+'" onclick="vdoCopyLink(this.dataset.url)" style="flex-shrink:0;white-space:nowrap">📋 Copy</button>';
-      h += '</div>';
-      h += '</div>';
-
-      // ── Optional custom view URL ──
-      h += '<div style="display:flex;align-items:center;gap:8px">';
-      h += '<span style="font-size:11px;color:var(--muted);white-space:nowrap">Custom view URL (optional):</span>';
-      h += '<input class="ifield" placeholder="Leave blank to use auto-generated" ';
-      h += 'value="'+x(feed.customUrl||'')+'" ';
-      h += 'data-pname="'+x(p.name)+'" ';
-      h += 'onchange="vdoSetCustomUrl(this.dataset.pname,this.value)" ';
-      h += 'style="flex:1;font-size:12px;padding:6px 10px;font-family:Space Mono,monospace">';
-      h += '</div>';
-
-      // ── Live preview iframe ──
+      // Live preview thumbnail — 80×80px square (≈5cm on screen), only when live
       if(isLive && viewUrl){
-        h += '<div style="position:relative;width:100%;padding-top:56.25%;border-radius:9px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,.08)">';
-        h += '<iframe id="vdo-frame-'+i+'" ';
-        h += 'src="'+viewUrl+'" ';
-        h += 'allow="camera;microphone;autoplay;fullscreen" ';
-        h += 'style="position:absolute;inset:0;width:100%;height:100%;border:none;background:#000" ';
-        h += 'allowfullscreen></iframe>';
-        h += '<div style="position:absolute;top:6px;left:6px;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:2px 8px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;pointer-events:none">● LIVE</div>';
+        h += '<div style="position:relative;width:80px;height:80px;flex-shrink:0;border-radius:8px;overflow:hidden;background:#000;border:1px solid rgba(46,204,113,.4)">';
+        h += '<iframe id="vdo-frame-'+i+'" src="'+viewUrl+'" ';
+        h += 'allow="camera;microphone;autoplay;fullscreen" allowfullscreen ';
+        h += 'style="position:absolute;inset:0;width:100%;height:100%;border:none;background:#000;transform:scale(1.01)"></iframe>';
+        h += '<div style="position:absolute;bottom:3px;left:4px;background:var(--danger);color:#fff;font-size:7px;font-family:Space Mono,monospace;padding:1px 5px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;pointer-events:none;letter-spacing:.5px">● LIVE</div>';
         h += '</div>';
+      } else {
+        // Placeholder square when no feed
+        h += '<div style="width:80px;height:80px;flex-shrink:0;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:22px">📷</div>';
       }
 
-      h += '</div>'; // end player card
+      h += '</div>'; // end player row
     });
 
     h += '</div>';
