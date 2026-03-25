@@ -871,6 +871,7 @@ function initFirebaseSync() {
         else if (getMode()==='single') renderSinglePlayerView();
       }
     }
+    if(typeof vdoUpdateStreams==='function') vdoUpdateStreams();
     renderOverview(); renderProj(); renderSession(); renderLobby(); renderScores(); updateFloatBar();
     // Re-render player screens if already on game screen
     if (!S.ain && S.me && document.getElementById('screen-game').classList.contains('active')) {
@@ -1107,8 +1108,8 @@ function endGame(){
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
   S.curQ=0; S.paused=false; S.revealAns=false; S.pickedAns=null; S.launched=false;
   S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
-  // Stop OBS streams
-  if(typeof obsStopAllCams==='function') obsStopAllCams();
+  // Clear VDO stream sentinels
+  if(typeof vdoUpdateStreams==='function'){ window._vdo&&(Object.keys(window._vdo.feeds||{}).forEach(pn=>{ if(window._vdo.feeds[pn]) window._vdo.feeds[pn].stopped=false; })); }
   // Clear streams so camera screen shows 'No feed' for next game
   S.streams={};
   sessionStorage.removeItem('qs_player');
@@ -2060,15 +2061,26 @@ async function requestCameraForPlayer(){ return null; }
 // Canvas was the old approach for BroadcastChannel relay — WebRTC doesn't need it.
 function _mediaEl(id, pname, styleExtra){
   const style = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000;' + (styleExtra||'');
+  const stream = S.streams && S.streams[pname];
+  // VDO.Ninja feed — render iframe
+  if(stream === 'vdo'){
+    const viewUrl = typeof vdoViewUrl==='function' ? vdoViewUrl(pname) : '';
+    if(viewUrl){
+      return '<iframe id="'+id+'" data-player="'+x(pname)+'" src="'+viewUrl+'" '
+           + 'allow="camera;microphone;autoplay;fullscreen" allowfullscreen '
+           + 'style="'+style+'border:none"></iframe>';
+    }
+  }
   return '<video id="'+id+'" data-player="'+x(pname)+'" autoplay playsinline muted style="'+style+'"></video>';
 }
 
-// ── Re-wire all known streams to video elements after any DOM rebuild ──
+// ── Re-wire all known streams to video elements after DOM rebuild ──
 function _rewireAllStreams(){
   if(!S.streams) return;
   document.querySelectorAll('video[data-player]').forEach(v=>{
     const pn = v.getAttribute('data-player');
     const st = S.streams[pn];
+    if(st === 'vdo') return;
     if(st instanceof MediaStream && !v.srcObject){
       v.srcObject = st;
       v.play().catch(()=>{});
@@ -2078,11 +2090,12 @@ function _rewireAllStreams(){
     }
   });
 }
-
 // ── After innerHTML is set, attach real stream or paint last frame ──
 function _attachMedia(id, pname){
   const el = document.getElementById(id);
   if(!el) return;
+  // VDO.Ninja — iframe handles its own src, nothing to wire
+  if(S.streams[pname] === 'vdo') return;
 
   const stream = S.streams[pname];
 
@@ -2097,10 +2110,8 @@ function _attachMedia(id, pname){
       el.play().catch(()=>{});
       if(stream.active) el.onplaying();
     }
-  } else if(stream === 'remote'){
-    // WebRTC handshake in progress — stream will arrive via ontrack and be wired
-    // directly to this video element via querySelectorAll('video[data-player]').
-    // Just hide the placeholder now so it doesn't cover the incoming video.
+  } else if(stream === 'remote' || stream === 'vdo'){
+    // Hide placeholder — VDO iframe or WebRTC stream handles video
     const phId2=id==='proj-vid-main'?'proj-vid-ph':id.replace('proj-vid-','proj-ph-');
     const ph2=document.getElementById(phId2);
     if(ph2){ph2.style.opacity='0';ph2.style.transition='opacity .4s';setTimeout(()=>{if(ph2)ph2.style.display='none';},400);}
@@ -2401,7 +2412,6 @@ function _renderProjSingle(el, qd){
   h+='</div></div>';
   el.innerHTML=h;
   _attachMedia('proj-vid-main', tp.name);
-  _rewireAllStreams();
 }
 
 // ── MULTIPLAYER projection ──
@@ -2505,7 +2515,6 @@ function _renderProjMulti(el, qd){
 
   el.innerHTML=h;
   shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
-  _rewireAllStreams();
   if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
 }
 
@@ -3109,429 +3118,259 @@ function toggleReveal(){
   toast(S.revealAns?'Answer revealed on projector.':'Answer hidden.','nf');
 }
 
-// ═══ CAMERAS — OBS WebSocket Integration ═══
-// OBS Studio 28+ has WebSocket server built in (Tools → WebSocket Server Settings)
-// Default port: 4455. No password needed on local network (or set one below).
+// ═══ CAMERAS — VDO.Ninja Integration ═══
+// VDO.Ninja is a free, no-install peer-to-peer video streaming service.
+// Each phone opens a push link in its browser — no app needed.
+// The admin app embeds view iframes to pull each feed.
 //
-// How it works:
-//   1. Admin enters OBS WebSocket URL (ws://localhost:4455 or ws://192.168.x.x:4455)
-//   2. App connects and fetches scene list automatically
-//   3. Admin assigns each scene to a player
-//   4. Each scene's preview comes through as a video feed on the projection
+// Architecture:
+//   Push link (phone):  https://vdo.ninja/?push=STREAMID&label=NAME
+//   View iframe (admin): https://vdo.ninja/?view=STREAMID&autostart&muted=0
 //
-// For video feeds: OBS outputs each scene via a local HTTP server using the
-// obs-basic-mjpeg plugin OR via Virtual Camera (one at a time).
-// We also support a base HTTP URL for MJPEG feeds per scene.
+// Admin enters ONE Room ID. The app generates push/view links automatically.
+// Admin can also paste a custom view URL per player for manual control.
 
-if(!window._obs) window._obs = {
-  wsUrl:    '',      // OBS WebSocket URL e.g. ws://localhost:4455
-  httpBase: '',      // Optional HTTP base for MJPEG feeds e.g. http://localhost:8080
-  password: '',      // OBS WebSocket password (leave blank if none)
-  scenes:   [],      // [{ name }] — fetched automatically from OBS
-  status:   'idle',  // idle | connecting | connected | error
-  assigned: {},      // { playerName: sceneName }
-  stopped:  {},      // { playerName: true }
-  streams:  {},      // { playerName: MediaStream } — from getUserMedia if virtual cam
+if(!window._vdo) window._vdo = {
+  room:     '',      // Room ID — shared base for all stream IDs
+  feeds:    {},      // { playerName: { streamId, customUrl, stopped } }
 };
 
-function obsSave(){
+function vdoSave(){
+  try{ localStorage.setItem('qs_vdo', JSON.stringify({room:window._vdo.room, feeds:window._vdo.feeds})); }catch(e){}
+}
+function vdoLoad(){
   try{
-    const s = {wsUrl:window._obs.wsUrl, httpBase:window._obs.httpBase,
-               password:window._obs.password, assigned:window._obs.assigned, stopped:window._obs.stopped};
-    localStorage.setItem('qs_obs2', JSON.stringify(s));
+    const raw = localStorage.getItem('qs_vdo');
+    if(raw){ const p=JSON.parse(raw); if(p.room) window._vdo.room=p.room; if(p.feeds) window._vdo.feeds=p.feeds; }
   }catch(e){}
 }
-function obsLoad(){
-  try{
-    const raw = localStorage.getItem('qs_obs2');
-    if(raw){
-      const p = JSON.parse(raw);
-      if(p.wsUrl)    window._obs.wsUrl    = p.wsUrl;
-      if(p.httpBase) window._obs.httpBase = p.httpBase;
-      if(p.password) window._obs.password = p.password;
-      if(p.assigned) window._obs.assigned = p.assigned;
-      if(p.stopped)  window._obs.stopped  = p.stopped;
-    }
-  }catch(e){}
-}
-obsLoad();
+vdoLoad();
 
-// Connect to OBS WebSocket and fetch scene list
-async function obsConnect(){
-  const wsUrlEl   = document.getElementById('obs-ws-url');
-  const httpEl    = document.getElementById('obs-http-base');
-  const passEl    = document.getElementById('obs-password');
-  if(wsUrlEl)   window._obs.wsUrl    = wsUrlEl.value.trim().replace(/\/+$/,'');
-  if(httpEl)    window._obs.httpBase = httpEl.value.trim().replace(/\/+$/,'');
-  if(passEl)    window._obs.password = passEl.value.trim();
-  window._obs.scenes = [];
-  window._obs.status = 'connecting';
-  obsSave();
+function vdoGenRoom(){
+  // Generate a random 8-char alphanumeric room ID
+  const chars='abcdefghijklmnopqrstuvwxyz0123456789';
+  let id='';
+  for(let i=0;i<8;i++) id+=chars[Math.floor(Math.random()*chars.length)];
+  window._vdo.room = id;
+  vdoSave();
   renderCameras();
-
-  const wsUrl = window._obs.wsUrl;
-  if(!wsUrl){ toast('Enter OBS WebSocket URL first.','er'); window._obs.status='idle'; renderCameras(); return; }
-
-  try {
-    await obsWsFetchScenes(wsUrl, window._obs.password);
-  } catch(e) {
-    window._obs.status = 'error';
-    window._obs.scenes = [];
-    toast('OBS connection failed: '+e.message,'er');
-    renderCameras();
-  }
+  toast('Room ID generated: '+id,'ok');
 }
 
-// Connect via OBS WebSocket v5 protocol to get scene list
-function obsWsFetchScenes(wsUrl, password){
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
-    let identified = false;
-    const timer = setTimeout(()=>{ ws.close(); reject(new Error('Connection timed out')); }, 6000);
-
-    ws.onopen = () => {
-      // OBS WebSocket v5 sends Hello on connect, we respond with Identify
-    };
-
-    ws.onmessage = async (evt) => {
-      let msg;
-      try { msg = JSON.parse(evt.data); } catch(e){ return; }
-
-      // Op 0 = Hello
-      if(msg.op === 0){
-        const identify = { op: 1, d: { rpcVersion: 1 } };
-        // If auth required, compute it
-        if(msg.d && msg.d.authentication){
-          if(!password){ ws.close(); clearTimeout(timer); reject(new Error('OBS password required — enter it below.')); return; }
-          try {
-            const auth = msg.d.authentication;
-            const secret = await obsHashAuth(password, auth.salt, auth.challenge);
-            identify.d.authentication = secret;
-          } catch(e){ ws.close(); clearTimeout(timer); reject(e); return; }
-        }
-        ws.send(JSON.stringify(identify));
-      }
-
-      // Op 2 = Identified (auth OK)
-      if(msg.op === 2){
-        // Request scene list
-        ws.send(JSON.stringify({ op:6, d:{ requestType:'GetSceneList', requestId:'scenes' } }));
-      }
-
-      // Op 7 = RequestResponse
-      if(msg.op === 7 && msg.d && msg.d.requestId === 'scenes'){
-        clearTimeout(timer);
-        const scenes = (msg.d.responseData && msg.d.responseData.scenes) || [];
-        window._obs.scenes = scenes.map(s => ({ name: s.sceneName || s.name || String(s) })).reverse();
-        window._obs.status = 'connected';
-        obsSave();
-        toast('OBS connected — '+window._obs.scenes.length+' scene'+(window._obs.scenes.length!==1?'s':'')+' found.','ok');
-        renderCameras();
-        ws.close();
-        resolve();
-      }
-    };
-
-    ws.onerror = (e) => { clearTimeout(timer); ws.close(); reject(new Error('WebSocket error — check URL and that OBS WebSocket is enabled.')); };
-    ws.onclose = () => { clearTimeout(timer); };
-  });
-}
-
-// Compute OBS WebSocket v5 auth hash
-async function obsHashAuth(password, salt, challenge){
-  const enc = new TextEncoder();
-  const secret = await crypto.subtle.digest('SHA-256', enc.encode(password + salt));
-  const secretB64 = btoa(String.fromCharCode(...new Uint8Array(secret)));
-  const auth = await crypto.subtle.digest('SHA-256', enc.encode(secretB64 + challenge));
-  return btoa(String.fromCharCode(...new Uint8Array(auth)));
-}
-
-function obsAssign(playerName, sceneName){
-  if(sceneName) window._obs.assigned[playerName] = sceneName;
-  else          delete window._obs.assigned[playerName];
-  obsSave();
+function vdoSaveRoom(){
+  const el=document.getElementById('vdo-room-inp');
+  if(el) window._vdo.room = el.value.trim().toLowerCase().replace(/[^a-z0-9]/g,'');
+  vdoSave();
   renderCameras();
 }
 
-function obsStop(playerName){
-  window._obs.stopped[playerName] = true;
-  if(window._obs.streams[playerName]){
-    // Do not stop the stream — just flag as stopped for display
-  }
-  obsSave(); renderCameras();
+// Build stream ID for a player — room + sanitised player name
+function vdoStreamId(playerName){
+  const room = (window._vdo.room||'').trim();
+  if(!room) return '';
+  // Sanitise: lowercase, alphanumeric only, max 30 chars
+  const safe = playerName.toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,20);
+  return room+safe;
+}
+
+function vdoPushUrl(playerName){
+  const sid = vdoStreamId(playerName);
+  if(!sid) return '';
+  return 'https://vdo.ninja/?push='+sid+'&label='+encodeURIComponent(playerName)+'&webcam';
+}
+
+function vdoViewUrl(playerName){
+  // Use custom URL if set, otherwise auto-generate
+  const custom = window._vdo.feeds[playerName] && window._vdo.feeds[playerName].customUrl;
+  if(custom) return custom;
+  const sid = vdoStreamId(playerName);
+  if(!sid) return '';
+  return 'https://vdo.ninja/?view='+sid+'&autostart&muted=0&cleanoutput&nocontrols';
+}
+
+function vdoSetCustomUrl(playerName, url){
+  if(!window._vdo.feeds[playerName]) window._vdo.feeds[playerName]={};
+  window._vdo.feeds[playerName].customUrl = url.trim();
+  vdoSave();
+  renderCameras();
+}
+
+function vdoStop(playerName){
+  if(!window._vdo.feeds[playerName]) window._vdo.feeds[playerName]={};
+  window._vdo.feeds[playerName].stopped = true;
+  vdoSave();
+  renderCameras();
   toast('Feed stopped: '+playerName,'nf');
 }
 
-function obsStart(playerName){
-  delete window._obs.stopped[playerName];
-  obsSave(); renderCameras();
+function vdoStart(playerName){
+  if(!window._vdo.feeds[playerName]) window._vdo.feeds[playerName]={};
+  window._vdo.feeds[playerName].stopped = false;
+  vdoSave();
+  renderCameras();
   toast('Feed started: '+playerName,'ok');
 }
 
-function obsStopAll(){
-  S.players.forEach(p=>{ window._obs.stopped[p.name]=true; });
-  obsSave(); renderCameras();
+function vdoStopAll(){
+  S.players.forEach(p=>{ if(!window._vdo.feeds[p.name]) window._vdo.feeds[p.name]={}; window._vdo.feeds[p.name].stopped=true; });
+  vdoSave(); renderCameras();
   toast('All feeds stopped.','nf');
 }
 
-function obsStartAll(){
-  window._obs.stopped = {};
-  obsSave(); renderCameras();
+function vdoStartAll(){
+  Object.keys(window._vdo.feeds).forEach(pn=>{ if(window._vdo.feeds[pn]) window._vdo.feeds[pn].stopped=false; });
+  vdoSave(); renderCameras();
   toast('All feeds started.','ok');
 }
 
-// Build MJPEG feed URL for a scene (requires OBS MJPEG server plugin or similar)
-function obsFeedUrl(sceneName){
-  const base = (window._obs.httpBase||'').trim().replace(/\/+$/,'');
-  if(!base||!sceneName) return '';
-  return base+'/'+encodeURIComponent(sceneName);
+function vdoCopyLink(url){
+  navigator.clipboard.writeText(url).then(()=>toast('Link copied!','ok')).catch(()=>{
+    // Fallback
+    const ta=document.createElement('textarea'); ta.value=url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); toast('Link copied!','ok');
+  });
 }
 
-// Start USB camera for a player (assigned scene name used as label)
-async function obsStartCam(playerName, deviceId){
-  if(!deviceId) return;
-  // Stop existing
-  if(window._obs.streams[playerName]){
-    window._obs.streams[playerName].getTracks().forEach(t=>t.stop());
-    delete window._obs.streams[playerName];
-    delete S.streams[playerName];
-  }
-  try{
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio:false,
-      video:{ deviceId:{exact:deviceId}, width:{ideal:1920}, height:{ideal:1080}, frameRate:{ideal:30} }
-    });
-    window._obs.streams[playerName] = stream;
-    S.streams[playerName] = stream;
-    renderCameras();
-    renderProj();
-    // Wire to projection immediately
-    setTimeout(()=>{
-      document.querySelectorAll('video[data-player]').forEach(v=>{
-        if(v.getAttribute('data-player')!==playerName) return;
-        if(!v.srcObject){ v.srcObject=stream; v.play().catch(()=>{}); }
-        const phId=v.id==='proj-vid-main'?'proj-vid-ph':v.id.replace('proj-vid-','proj-ph-');
-        const ph=document.getElementById(phId);
-        if(ph){ ph.style.opacity='0'; ph.style.transition='opacity .5s'; setTimeout(()=>{ if(ph) ph.style.display='none'; },500); }
-      });
-    },120);
-    toast('📹 '+playerName+' camera live','ok');
-  }catch(e){
-    toast('Camera error: '+e.message,'er');
-  }
-}
-
-async function obsDetectCams(){
-  try{
-    const tmp = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
-    tmp.getTracks().forEach(t=>t.stop());
-    const all = await navigator.mediaDevices.enumerateDevices();
-    window._obs._devices = all.filter(d=>d.kind==='videoinput');
-    renderCameras();
-    toast('Found '+window._obs._devices.length+' camera device'+(window._obs._devices.length!==1?'s':''),'ok');
-  }catch(e){
-    toast('Camera permission denied','er');
-  }
-}
-
-function obsStopCam(playerName){
-  if(window._obs.streams[playerName]){
-    window._obs.streams[playerName].getTracks().forEach(t=>t.stop());
-    delete window._obs.streams[playerName];
-    delete S.streams[playerName];
-  }
-  renderCameras(); renderProj();
-}
-
-function obsStopAllCams(){
-  Object.keys(window._obs.streams||{}).forEach(pn=>{ obsStopCam(pn); });
-  renderCameras(); renderProj();
+// Wire VDO.Ninja iframe feeds into S.streams as sentinel so projection knows feeds exist
+// The actual video lives in the iframes — projection shows them via <iframe> not <video>
+function vdoUpdateStreams(){
+  if(!S.gon) return;
+  S.players.forEach(p=>{
+    const feed   = window._vdo.feeds[p.name] || {};
+    const hasUrl = !!vdoViewUrl(p.name);
+    const stopped= !!feed.stopped;
+    if(hasUrl && !stopped){
+      // Mark as active so projection renders the iframe slot
+      if(!(S.streams[p.name] instanceof MediaStream)) S.streams[p.name] = 'vdo';
+    } else {
+      if(S.streams[p.name]==='vdo') delete S.streams[p.name];
+    }
+  });
 }
 
 function renderCameras(){
-  const n       = S.players.length;
-  const scenes  = window._obs.scenes || [];
-  const status  = window._obs.status || 'idle';
-  const devices = window._obs._devices || [];
+  const n    = S.players.length;
+  const room = window._vdo.room || '';
+  const hasRoom = !!room;
 
   let h = '';
   h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px">';
-  h += '<div class="ptitle" style="margin-bottom:0">📹 Camera Setup — OBS</div>';
-  if(status==='connected'){
+  h += '<div class="ptitle" style="margin-bottom:0">📹 Camera Feeds — VDO.Ninja</div>';
+  if(n>0){
     h += '<div style="display:flex;gap:7px">';
-    h += '<button class="btn btn-outline btn-sm" onclick="obsConnect()">🔄 Refresh</button>';
-    h += '<button class="btn btn-danger btn-sm" onclick="obsStopAll()">⏹ Stop All</button>';
+    h += '<button class="btn btn-safe btn-sm" onclick="vdoStartAll()">▶ Start All</button>';
+    h += '<button class="btn btn-danger btn-sm" onclick="vdoStopAll()">⏹ Stop All</button>';
     h += '</div>';
   }
   h += '</div>';
 
-  // ── Step 1: OBS WebSocket connection ──
-  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:10px">📡 OBS WebSocket</div>';
-  h += '<div style="font-size:13px;color:var(--muted);margin-bottom:12px;line-height:1.6">';
-  h += 'In OBS: <b style="color:var(--text)">Tools → WebSocket Server Settings</b> → Enable → note the port (default 4455).';
+  // ── How it works ──
+  h += '<div style="background:rgba(91,76,255,.07);border:1px solid rgba(91,76,255,.2);border-radius:11px;padding:13px 16px;margin-bottom:16px;font-size:13px;color:var(--muted);line-height:1.8">';
+  h += '<strong style="color:var(--text)">How it works:</strong><br>';
+  h += '1. Set a Room ID below and click Save<br>';
+  h += '2. Share each player&#39;s <b style="color:var(--accent)">Push Link</b> — they open it on their phone (no app needed)<br>';
+  h += '3. Their camera streams instantly — you see it in the preview below<br>';
+  h += '4. Works over any network including school WiFi';
   h += '</div>';
 
-  h += '<div style="display:flex;flex-direction:column;gap:8px">';
+  // ── Room ID panel ──
+  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
+  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:10px">🔑 Room ID</div>';
   h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-  h += '<input id="obs-ws-url" class="ifield" placeholder="ws://localhost:4455" ';
-  h += 'value="'+x(window._obs.wsUrl)+'" ';
-  h += 'style="flex:1;min-width:200px;font-family:Space Mono,monospace;font-size:13px" ';
-  h += 'onkeydown="if(event.key===&quot;Enter&quot;) obsConnect()">';
-  h += '<input id="obs-password" class="ifield" type="password" placeholder="Password (if set)" ';
-  h += 'value="'+x(window._obs.password)+'" ';
-  h += 'style="width:160px;font-size:13px">';
-  h += '<button class="btn btn-primary btn-sm" onclick="obsConnect()">🔌 Connect & Fetch Scenes</button>';
+  h += '<input id="vdo-room-inp" class="ifield" placeholder="e.g. quiznight2024" ';
+  h += 'value="'+x(room)+'" ';
+  h += 'style="flex:1;min-width:160px;font-family:Space Mono,monospace;font-size:14px;letter-spacing:2px" ';
+  h += 'oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9]/g,&quot;&quot;)">';
+  h += '<button class="btn btn-primary btn-sm" onclick="vdoSaveRoom()">💾 Save</button>';
+  h += '<button class="btn btn-outline btn-sm" onclick="vdoGenRoom()">🎲 Generate</button>';
   h += '</div>';
-
-  // Status
-  if(status==='connecting'){
-    h += '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn);padding:4px 0">';
-    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--warn);animation:pulse 1s infinite;flex-shrink:0"></div>Connecting to OBS…</div>';
-  } else if(status==='connected'){
-    h += '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--safe);padding:4px 0">';
-    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--safe);flex-shrink:0"></div>';
-    h += '✅ Connected — <b>'+scenes.length+'</b> scene'+(scenes.length!==1?'s':'')+' found';
-    h += '</div>';
-  } else if(status==='error'){
-    h += '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--danger);padding:4px 0">';
-    h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--danger);flex-shrink:0"></div>';
-    h += '❌ Connection failed — check URL and that WebSocket Server is enabled in OBS.</div>';
+  if(hasRoom){
+    h += '<div style="margin-top:8px;font-size:11px;color:var(--muted)">Room: <code style="color:var(--gold);font-family:Space Mono,monospace;font-size:12px">'+x(room)+'</code></div>';
   }
   h += '</div>';
-  h += '</div>';
 
-  // ── Step 2: Assign scenes to players ──
-  h += '<div style="background:var(--card);border:1px solid rgba(91,76,255,.35);border-radius:14px;padding:18px;margin-bottom:14px">';
-  h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600">🎯 Assign OBS Scenes to Players</div>';
-  h += '<button class="btn btn-outline btn-sm" onclick="obsDetectCams()">🎥 Detect USB Cameras</button>';
-  h += '</div>';
-
-  if(status!=='connected'){
-    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;padding:8px 0">Connect to OBS above to load scenes.</div>';
+  // ── Player feeds ──
+  if(!hasRoom){
+    h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:40px;text-align:center;color:var(--muted)">';
+    h += '<div style="font-size:36px;margin-bottom:10px">🔑</div>';
+    h += '<div style="font-size:15px;font-weight:600;margin-bottom:5px">Set a Room ID first</div>';
+    h += '<div style="font-size:13px">Enter any word or phrase above — this becomes the shared room for all camera feeds.</div>';
+    h += '</div>';
   } else if(!n){
-    h += '<div style="font-size:13px;color:var(--muted);font-style:italic;padding:8px 0">No players have joined yet.</div>';
+    h += '<div style="background:var(--card);border:1px solid var(--border);border-radius:14px;padding:40px;text-align:center;color:var(--muted)">';
+    h += '<div style="font-size:36px;margin-bottom:10px">👥</div>';
+    h += '<div style="font-size:15px;font-weight:600">No players yet</div>';
+    h += '<div style="font-size:13px;margin-top:4px">Players appear here once they join an active game.</div>';
+    h += '</div>';
   } else {
-    h += '<div style="display:flex;flex-direction:column;gap:12px">';
-    S.players.forEach((p, i) => {
-      const assignedScene = window._obs.assigned[p.name] || '';
-      const isStopped     = !!window._obs.stopped[p.name];
-      const camStream     = window._obs.streams && window._obs.streams[p.name];
-      const hasStream     = camStream instanceof MediaStream;
-      const hasAssign     = !!assignedScene;
-      // Check if scene is already used by another player
-      const inUseBy = Object.entries(window._obs.assigned).find(([pn,sn])=>sn===assignedScene&&pn!==p.name);
-      const borderCol = hasStream&&!isStopped ? 'rgba(46,204,113,.5)' : hasAssign ? 'rgba(91,76,255,.4)' : 'var(--border)';
+    h += '<div style="display:flex;flex-direction:column;gap:14px">';
 
-      h += '<div style="background:var(--panel);border:1.5px solid '+borderCol+';border-radius:13px;padding:14px;display:flex;flex-direction:column;gap:10px">';
+    S.players.forEach((p,i)=>{
+      const feed     = window._vdo.feeds[p.name] || {};
+      const stopped  = !!feed.stopped;
+      const pushUrl  = vdoPushUrl(p.name);
+      const viewUrl  = vdoViewUrl(p.name);
+      const isLive   = hasRoom && !stopped;
+      const borderCol= isLive?'rgba(46,204,113,.5)':stopped?'rgba(231,76,60,.3)':'var(--border)';
 
-      // Top row: player info + scene selector + status
+      h += '<div style="background:var(--card);border:1.5px solid '+borderCol+';border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:12px">';
+
+      // ── Top row: player info + status + controls ──
       h += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
-
-      // Player info
-      h += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;min-width:110px">';
-      h += '<div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:15px">'+p.emoji+'</div>';
-      h += '<div><div style="font-size:13px;font-weight:700;color:#fff">'+x(p.name)+'</div>';
-      const stCol = hasStream&&!isStopped?'var(--safe)':hasAssign&&!isStopped?'var(--warn)':'var(--muted)';
-      const stTxt = hasStream&&!isStopped?'● Live':hasAssign&&!isStopped?'⟳ Assigned':isStopped?'⏹ Stopped':'No feed';
-      h += '<div style="font-size:10px;color:'+stCol+';font-weight:700">'+stTxt+'</div></div>';
-      h += '</div>';
-
-      // Scene selector
-      h += '<select data-pname="'+x(p.name)+'" onchange="obsAssign(this.dataset.pname,this.value)" ';
-      h += 'style="flex:1;min-width:150px;background:var(--panel);border:1px solid '+(hasAssign?'rgba(91,76,255,.5)':'var(--border)')+';border-radius:9px;padding:7px 11px;color:var(--text);font-family:DM Sans,sans-serif;font-size:13px;cursor:pointer;outline:none">';
-      h += '<option value="">— Select OBS scene —</option>';
-      scenes.forEach(s => {
-        const usedByOther = Object.entries(window._obs.assigned).some(([pn,sn])=>sn===s.name&&pn!==p.name);
-        const sel = s.name===assignedScene?' selected':'';
-        h += '<option value="'+x(s.name)+'"'+sel+(usedByOther?' disabled':'')+'>'+x(s.name)+(usedByOther?' (in use)':'')+'</option>';
-      });
-      h += '</select>';
-
-      // Status badge
-      if(hasStream&&!isStopped){
-        h += '<span style="background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.4);color:var(--safe);font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap">● LIVE</span>';
-      } else if(isStopped){
-        h += '<span style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);color:var(--danger);font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap">⏹ STOPPED</span>';
-      } else if(hasAssign){
-        h += '<span style="background:rgba(245,200,66,.08);border:1px solid rgba(245,200,66,.3);color:var(--gold);font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap">⟳ ASSIGNED</span>';
-      }
+      h += '<div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">'+p.emoji+'</div>';
+      h += '<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;color:#fff">'+x(p.name)+'</div>';
+      const stCol=isLive?'var(--safe)':stopped?'var(--danger)':'var(--muted)';
+      const stTxt=isLive?'● Live feed active':stopped?'⏹ Feed stopped':'⟳ Waiting for push';
+      h += '<div style="font-size:11px;color:'+stCol+';font-weight:700;margin-top:1px">'+stTxt+'</div></div>';
 
       // Stop / Start button
-      if(hasStream){
-        if(isStopped){
-          h += '<button class="btn btn-safe btn-xs" data-pname="'+x(p.name)+'" onclick="obsStart(this.dataset.pname)">▶ Start</button>';
-        } else {
-          h += '<button class="btn btn-danger btn-xs" data-pname="'+x(p.name)+'" onclick="obsStop(this.dataset.pname)">⏹ Stop</button>';
-        }
+      if(stopped){
+        h += '<button class="btn btn-safe btn-sm" data-pname="'+x(p.name)+'" onclick="vdoStart(this.dataset.pname)">▶ Start</button>';
+      } else {
+        h += '<button class="btn btn-danger btn-sm" data-pname="'+x(p.name)+'" onclick="vdoStop(this.dataset.pname)">⏹ Stop</button>';
       }
-      h += '</div>'; // end top row
+      h += '</div>';
 
-      // USB camera selector row (always shown when devices detected)
-      if(devices.length > 0){
-        h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
-        h += '<span style="font-size:11px;color:var(--muted);white-space:nowrap">USB Camera:</span>';
-        h += '<select data-pname="'+x(p.name)+'" onchange="obsStartCam(this.dataset.pname,this.value)" ';
-        h += 'style="flex:1;min-width:150px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--text);font-family:DM Sans,sans-serif;font-size:12px;cursor:pointer;outline:none">';
-        h += '<option value="">— Select camera device —</option>';
-        devices.forEach(d=>{
-          const lbl = d.label||('Camera '+(devices.indexOf(d)+1));
-          const usedByOther = Object.values(window._obs.streams||{}).some((st,idx)=>{ return false; });
-          h += '<option value="'+d.deviceId+'">'+x(lbl)+'</option>';
-        });
-        h += '</select>';
-        if(hasStream){
-          h += '<button class="btn btn-danger btn-xs" data-pname="'+x(p.name)+'" onclick="obsStopCam(this.dataset.pname)">⏹</button>';
-        }
-        h += '</div>';
-      }
+      // ── Push link row ──
+      h += '<div style="background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);border-radius:9px;padding:10px 13px">';
+      h += '<div style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:6px">📱 Phone Push Link — share with '+x(p.name)+'</div>';
+      h += '<div style="display:flex;align-items:center;gap:8px">';
+      h += '<code style="flex:1;font-size:11px;color:var(--accent);font-family:Space Mono,monospace;word-break:break-all;line-height:1.5">'+x(pushUrl)+'</code>';
+      h += '<button class="btn btn-outline btn-xs" data-url="'+x(pushUrl)+'" onclick="vdoCopyLink(this.dataset.url)" style="flex-shrink:0;white-space:nowrap">📋 Copy</button>';
+      h += '</div>';
+      h += '</div>';
 
-      // Live preview thumbnail
-      if(hasStream && !isStopped){
-        h += '<div style="position:relative;width:100%;padding-top:56.25%;border-radius:9px;overflow:hidden;background:#000">';
-        h += '<video id="obs-prev-'+i+'" autoplay playsinline muted ';
-        h += 'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover"></video>';
-        h += '<div style="position:absolute;top:6px;left:6px;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:2px 7px;border-radius:20px;animation:pulse 2s infinite;font-weight:700">● LIVE</div>';
+      // ── Optional custom view URL ──
+      h += '<div style="display:flex;align-items:center;gap:8px">';
+      h += '<span style="font-size:11px;color:var(--muted);white-space:nowrap">Custom view URL (optional):</span>';
+      h += '<input class="ifield" placeholder="Leave blank to use auto-generated" ';
+      h += 'value="'+x(feed.customUrl||'')+'" ';
+      h += 'data-pname="'+x(p.name)+'" ';
+      h += 'onchange="vdoSetCustomUrl(this.dataset.pname,this.value)" ';
+      h += 'style="flex:1;font-size:12px;padding:6px 10px;font-family:Space Mono,monospace">';
+      h += '</div>';
+
+      // ── Live preview iframe ──
+      if(isLive && viewUrl){
+        h += '<div style="position:relative;width:100%;padding-top:56.25%;border-radius:9px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,.08)">';
+        h += '<iframe id="vdo-frame-'+i+'" ';
+        h += 'src="'+viewUrl+'" ';
+        h += 'allow="camera;microphone;autoplay;fullscreen" ';
+        h += 'style="position:absolute;inset:0;width:100%;height:100%;border:none;background:#000" ';
+        h += 'allowfullscreen></iframe>';
+        h += '<div style="position:absolute;top:6px;left:6px;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:2px 8px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;pointer-events:none">● LIVE</div>';
         h += '</div>';
       }
 
       h += '</div>'; // end player card
     });
-    h += '</div>';
 
-    // Global controls
-    h += '<div style="display:flex;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">';
-    h += '<button class="btn btn-safe btn-sm" onclick="obsStartAll()">▶ Start All</button>';
-    h += '<button class="btn btn-danger btn-sm" onclick="obsStopAll()">⏹ Stop All</button>';
     h += '</div>';
   }
-  h += '</div>';
-
-  // ── Tips ──
-  h += '<div style="background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.2);border-radius:12px;padding:14px 18px">';
-  h += '<div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">💡 Setup Guide</div>';
-  h += '<div style="font-size:13px;color:var(--muted);line-height:1.9">';
-  h += '1. In OBS: <b style="color:var(--text)">Tools → WebSocket Server Settings</b> → Enable Server<br>';
-  h += '2. Add one <b style="color:var(--text)">Scene</b> per player in OBS (e.g. "Player 1", "Player 2")<br>';
-  h += '3. Add the player&#39;s camera as a <b style="color:var(--text)">Video Capture Device</b> source in each scene<br>';
-  h += '4. Click <b style="color:var(--text)">Connect & Fetch Scenes</b> — scenes appear automatically<br>';
-  h += '5. Assign each scene to its player<br>';
-  h += '6. Click <b style="color:var(--text)">Detect USB Cameras</b> and assign the camera device to each player for live preview';
-  h += '</div>';
-  h += '</div>';
 
   document.getElementById('ap-cameras').innerHTML = h;
 
-  // Wire preview videos
-  S.players.forEach((p,i)=>{
-    const vid = document.getElementById('obs-prev-'+i);
-    const st  = window._obs.streams && window._obs.streams[p.name];
-    if(vid && st instanceof MediaStream){
-      vid.srcObject = st;
-      vid.play().catch(()=>{});
-    }
-  });
+  // Update S.streams so projection knows which players have active feeds
+  vdoUpdateStreams();
 }
 
 function setMain(card,name){ toast(name+' set as main feed.','nf'); }
