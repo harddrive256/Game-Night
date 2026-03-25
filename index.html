@@ -845,7 +845,9 @@ function initFirebaseSync() {
     S.revealAns= gameData.revealAns || false;
     S.curStep  = gameData.curStep || 10;
     S.pickedAns= (gameData.pickedAns !== undefined) ? gameData.pickedAns : null;
-    if(gameData.lifelines) S.lifelines = gameData.lifelines;
+    S.lifelines = gameData.lifelines
+      ? { fifty:!!gameData.lifelines.fifty, ask:!!gameData.lifelines.ask, skip:!!gameData.lifelines.skip, hiddenAnswers:gameData.lifelines.hiddenAnswers||[] }
+      : {fifty:false,ask:false,skip:false,hiddenAnswers:[]};
     S.mpBonus   = gameData.mpBonus   || false;
     S.gameOver  = gameData.gameOver  || false;
     S.buzzed    = gameData.buzzed    || null;
@@ -1079,6 +1081,8 @@ function releaseGame(){
   // Write full quiz into Firebase so player devices (which have no quiz data) can load it
   const gameData={
     gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:10, status:'active',
+    lifelines:{fifty:false,ask:false,skip:false,hiddenAnswers:[]},
+    mpBonus:false, gameOver:false, buzzed:null, launched:false,
     quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
            difficulty:q.difficulty, desc:q.desc||'', mode:q.mode||'single',
            submode:q.submode||'default', questions:q.questions||[] }
@@ -1094,8 +1098,9 @@ function releaseGame(){
   }
 }
 function launchProjection(){
-  // Push launched flag so players move from lobby to game screen
   S.launched = true;
+  // Sync camera feed sentinels so projection renders feeds immediately
+  if(typeof vdoUpdateStreams === 'function') vdoUpdateStreams();
   if(window._fb && window._fb.ready()){
     window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:false, revealAns:S.revealAns,
       curStep:S.curStep, status:'active', pickedAns:S.pickedAns, lifelines:S.lifelines,
@@ -2188,6 +2193,7 @@ function isFast(){ return getMode()==='multi' && getSubmode()==='fast'; }
 function renderProj(){
   const el=document.getElementById('proj');
   updateFloatBar();
+  if(typeof vdoUpdateStreams === 'function') vdoUpdateStreams();
 
   // ── No game ──
   if(!S.gon){
@@ -2900,6 +2906,8 @@ function relFromLib(id){
   S.streams={};
   const gameData={
     gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:10, status:'active',
+    lifelines:{fifty:false,ask:false,skip:false,hiddenAnswers:[]},
+    mpBonus:false, gameOver:false, buzzed:null, launched:false,
     quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
            difficulty:q.difficulty, desc:q.desc||'', mode:q.mode||'single',
            submode:q.submode||'default', questions:q.questions||[] }
