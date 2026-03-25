@@ -490,6 +490,8 @@ body { overflow-x: hidden; min-width: 0; }
     <div class="admin-chip"><span style="width:22px;height:22px;background:var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px">👑</span>Admin</div>
     <button class="btn btn-ghost btn-sm" onclick="doLogout()">Sign Out</button>
   </div>
+  <!-- Player name — used by _completeJoin; hidden but must exist in DOM -->
+  <span id="gcname" style="display:none"></span>
 </nav>
 
 <!-- HOME -->
@@ -1071,7 +1073,6 @@ function releaseGame(){
 }
 function launchProjection(){
   S.launched = true;
-  // Sync camera feed sentinels so projection renders feeds immediately
   if(typeof vdoUpdateStreams === 'function') vdoUpdateStreams();
   if(window._fb && window._fb.ready()){
     window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:false, revealAns:S.revealAns,
@@ -1079,11 +1080,13 @@ function launchProjection(){
       mpBonus:S.mpBonus, gameOver:S.gameOver, launched:true, buzzed:S.buzzed||null });
   }
   go('projector');
-  // Re-wire all existing MediaStreams to the freshly rendered <video> elements
+  // renderProj() inside go() builds the DOM, but video elements need a tick to exist
+  // before srcObject can be assigned. Re-render + rewire after a short delay.
   setTimeout(() => {
-    _rewireAllStreams();
-    rtcEnsureReceiving();
-  }, 80);
+    renderProj();          // rebuild DOM fresh
+    _rewireAllStreams();   // attach MediaStream objects to <video> elements
+    rtcEnsureReceiving(); // start WebRTC receive for remote cameras
+  }, 150);
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
