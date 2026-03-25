@@ -603,43 +603,12 @@ body { overflow-x: hidden; min-width: 0; }
   </div>
 </div>
 
-<!-- GAMEPLAY -->
+<!-- GAMEPLAY — content is fully replaced at runtime by renderSinglePlayerView() / renderFastPlayerScreen() -->
 <div id="screen-game" class="screen">
-  <div class="game-layout">
-    <div class="gcam">
-      <div class="cfeed">🧑‍💼<div class="lbadge">● LIVE</div></div>
-      <div style="padding:11px;border-top:1px solid var(--border)">
-        <div id="gcname" style="font-family:'Bebas Neue',cursive;font-size:18px;color:var(--gold);letter-spacing:1px">Player</div>
-        <div style="font-family:'Space Mono',monospace;font-size:11px;color:var(--muted)">Score: <span style="color:var(--gold)">60 pts</span></div>
-      </div>
-    </div>
-    <div>
-      <div style="display:flex;align-items:center;justify-content:space-between;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 13px;margin-bottom:10px;flex-wrap:wrap;gap:7px">
-        <span style="font-size:13px;color:var(--muted)">Question 7 of 15</span>
-        <div style="display:flex;gap:5px">
-          <button style="padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:11px;cursor:pointer;font-family:'DM Sans',sans-serif">🔀 50:50</button>
-          <button style="padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);font-size:11px;text-decoration:line-through;font-family:'DM Sans',sans-serif;opacity:.4;cursor:not-allowed">👥 Audience</button>
-          <button style="padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:11px;cursor:pointer;font-family:'DM Sans',sans-serif">📞 Phone</button>
-        </div>
-      </div>
-      <div style="background:var(--card);border:1px solid var(--border);border-radius:15px;padding:22px;margin-bottom:10px;text-align:center">
-        <div style="font-family:'Space Mono',monospace;color:var(--gold);font-size:12px;margin-bottom:9px;font-weight:700">💰 Question 7 — 70 Points</div>
-        <div style="font-size:clamp(15px,1.8vw,20px);font-weight:500;line-height:1.5">What is the chemical symbol for gold on the periodic table of elements?</div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-        <button class="abtn" onclick="pickAns(this,'wrong')"><div class="aletter">A</div>Go — Gold</button>
-        <button class="abtn" onclick="pickAns(this,'correct')"><div class="aletter">B</div>Au — Aurum</button>
-        <button class="abtn" onclick="pickAns(this,'wrong')"><div class="aletter">C</div>Gd — Gadolinium</button>
-        <button class="abtn" onclick="pickAns(this,'wrong')"><div class="aletter">D</div>Gl — Glaucum</button>
-      </div>
-      <div style="display:flex;gap:8px;justify-content:center">
-        <button class="btn btn-outline btn-sm" onclick="go('lobby')">← Quit</button>
-        <button class="btn btn-primary btn-sm" onclick="clearAns()">Next →</button>
-      </div>
-    </div>
-    <div style="background:var(--card);border:1px solid var(--border);border-radius:13px;padding:11px;overflow-y:auto">
-      <div style="font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;text-align:center;font-weight:600">Points Ladder</div>
-      <div id="ladder"></div>
+  <div style="min-height:calc(100vh - 58px);display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,#07070f,#0d0c1e)">
+    <div style="text-align:center;color:var(--muted)">
+      <div style="font-size:42px;margin-bottom:12px;animation:pulse 2s infinite">⏳</div>
+      <div style="font-family:'Bebas Neue',cursive;font-size:22px;letter-spacing:3px">Loading game…</div>
     </div>
   </div>
 </div>
@@ -871,6 +840,7 @@ function initFirebaseSync() {
       else if (onGame) {
         if (typeof isFast==='function' && isFast()) renderFastPlayerScreen();
         else if (getMode()==='single') renderSinglePlayerView();
+        else renderMultiPlayerView();
       }
     }
     if(typeof vdoUpdateStreams==='function') vdoUpdateStreams();
@@ -879,6 +849,7 @@ function initFirebaseSync() {
     if (!S.ain && S.me && document.getElementById('screen-game').classList.contains('active')) {
       if (typeof isFast==='function' && isFast()) renderFastPlayerScreen();
       else if (getMode()==='single') renderSinglePlayerView();
+      else renderMultiPlayerView();
     }
   });
 
@@ -974,6 +945,7 @@ function go(id){
   if(id==='game' && !S.ain && S.me){
     if(typeof isFast==='function' && isFast()) renderFastPlayerScreen();
     else if(getMode()==='single') renderSinglePlayerView();
+    else renderMultiPlayerView();
   }
 }
 
@@ -1107,6 +1079,11 @@ function launchProjection(){
       mpBonus:S.mpBonus, gameOver:S.gameOver, launched:true, buzzed:S.buzzed||null });
   }
   go('projector');
+  // Re-wire all existing MediaStreams to the freshly rendered <video> elements
+  setTimeout(() => {
+    _rewireAllStreams();
+    rtcEnsureReceiving();
+  }, 80);
 }
 function endGame(){
   if(!confirm('End session? All players will be removed.'))return;
@@ -2365,8 +2342,8 @@ function _renderProjSingle(el, qd){
     h+='<div style="display:flex;gap:5px;align-items:center;margin-bottom:10px">';
     h+='<span style="font-size:8px;color:rgba(255,255,255,.28);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-right:3px">Lifelines</span>';
     h+=llBtn('50%','50:50 — Remove two wrong answers', ll.fifty,'useFiftyFifty');
-    h+=llBtn('📞','Ask Anyone — Consult someone',     ll.ask,  'useAskAnyone');
-    h+=llBtn('⏭️','Skip — Pass this question',        ll.skip, 'useSkip');
+    h+=llBtn('📞','Ask Anyone — Consult someone',      ll.ask,  'useAskAnyone');
+    h+=llBtn('⏭️','Skip — Pass this question',         ll.skip, 'useSkip');
     h+='</div>';
 
     // Question text
@@ -3504,6 +3481,62 @@ function renderFastPlayerScreen(){
   }
   h+='</div>'; screen.innerHTML=h;
 }
+
+// ── MULTIPLAYER DEFAULT player screen — view-only, no lifelines, no clickable answers ──
+function renderMultiPlayerView(){
+  if(!S.me) return;
+  const screen=document.getElementById('screen-game'); if(!screen) return;
+  const me=S.players.find(p=>p.name===S.me);
+  const myScore=me?(me.score||0):0;
+  const qd=S.aq&&S.aq.questions&&S.aq.questions[S.curQ||0];
+  const picked=S.pickedAns, revealed=picked!==null;
+
+  let h='<div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f,#0d0c1e);display:flex;flex-direction:column;padding:20px;gap:14px;overflow-y:auto">';
+
+  // Player chip
+  h+='<div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:9px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0">';
+  h+='<div style="font-size:22px">'+(me?me.emoji:'🎮')+'</div>';
+  h+='<div><div style="font-family:Bebas Neue,cursive;font-size:18px;color:var(--gold);letter-spacing:1px">'+x(S.me||'')+'</div>';
+  h+='<div style="font-size:11px;color:var(--muted)">Score: <span style="color:var(--safe);font-weight:700">'+myScore+' pts</span></div></div></div>';
+
+  if(S.paused){
+    h+='<div style="flex:1;display:flex;align-items:center;justify-content:center">';
+    h+='<div style="font-family:Bebas Neue,cursive;font-size:40px;color:var(--warn);letter-spacing:4px">⏸ PAUSED</div></div>';
+  } else if(qd) {
+    // Quiz header
+    h+='<div style="background:rgba(91,76,255,.08);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:7px 13px;font-family:Space Mono,monospace;font-size:10px;color:rgba(245,200,66,.7);letter-spacing:1px;flex-shrink:0">';
+    h+='Q'+((S.curQ||0)+1)+' / '+(S.aq&&S.aq.questions?S.aq.questions.length:0)+'</div>';
+
+    // Question text
+    h+='<div style="background:rgba(0,0,0,.5);border:2px solid rgba(91,76,255,.35);border-radius:14px;padding:16px 18px;font-size:clamp(14px,2vw,20px);font-weight:600;line-height:1.55;color:#fff;flex-shrink:0">'+x(qd.text)+'</div>';
+
+    // Answers — view only, not clickable, no lifelines
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;flex-shrink:0">';
+    qd.answers.forEach((a,i)=>{
+      const isCorrect=qd&&i===qd.correct, isPicked=picked!==null&&i===picked, isWrong=isPicked&&!isCorrect;
+      let bg,bdr,col,lBg,lCol;
+      if(!revealed){bg='rgba(255,255,255,.06)';bdr='rgba(255,255,255,.12)';col='rgba(255,255,255,.75)';lBg='rgba(255,255,255,.08)';lCol='var(--gold)';}
+      else if(isCorrect){bg='rgba(46,204,113,.18)';bdr='rgba(46,204,113,.8)';col='var(--safe)';lBg='rgba(46,204,113,.3)';lCol='var(--safe)';}
+      else if(isWrong){bg='rgba(231,76,60,.15)';bdr='rgba(231,76,60,.75)';col='var(--danger)';lBg='rgba(231,76,60,.3)';lCol='var(--danger)';}
+      else{bg='rgba(255,255,255,.02)';bdr='rgba(255,255,255,.05)';col='rgba(255,255,255,.2)';lBg='rgba(255,255,255,.05)';lCol='rgba(255,255,255,.18)';}
+      const shadow=(isCorrect&&revealed)?'box-shadow:0 0 14px rgba(46,204,113,.25);':(isWrong?'box-shadow:0 0 12px rgba(231,76,60,.2);':'');
+      h+='<div style="background:'+bg+';border:2px solid '+bdr+';border-radius:11px;padding:9px 12px;display:flex;align-items:center;gap:8px;'+shadow+'cursor:default">';
+      h+='<div style="width:26px;height:26px;border-radius:6px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:12px;color:'+col+';font-weight:500;flex:1">'+x(a)+'</div>';
+      if(isCorrect&&revealed) h+='<span style="font-size:14px">✅</span>';
+      if(isWrong) h+='<span style="font-size:14px">❌</span>';
+      h+='</div>';
+    });
+    h+='</div>';
+    h+='<div style="text-align:center;font-size:11px;color:rgba(255,255,255,.2);letter-spacing:1px;font-family:Space Mono,monospace">👁 VIEW ONLY — ANSWERS CONTROLLED BY HOST</div>';
+  } else {
+    h+='<div style="flex:1;display:flex;align-items:center;justify-content:center"><div style="font-family:Bebas Neue,cursive;font-size:24px;color:rgba(255,255,255,.2);letter-spacing:3px">WAITING FOR QUESTION…</div></div>';
+  }
+
+  h+='</div>';
+  screen.innerHTML=h;
+}
+
 function doBuzz(){
   if(!S.me||S.buzzed) return;
   if(!window._fb||!window._fb.ready()){toast('Connection error','er');return;}
