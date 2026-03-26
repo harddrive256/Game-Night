@@ -1135,6 +1135,9 @@ function endGame(){
   S.gon=false; S.gc=null; S.aq=null; S.players=[]; S.me=null; S.playerCode=null;
   S.curQ=0; S.paused=false; S.revealAns=false; S.pickedAns=null; S.launched=false;
   S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
+  // Reset the persistent video layer so next game rebuilds it cleanly
+  const oldVL=document.getElementById('proj-vid-layer'); if(oldVL) oldVL.remove();
+  const oldOV=document.getElementById('proj-overlay');   if(oldOV) oldOV.remove();
   // Clear VDO stream sentinels
   if(typeof vdoUpdateStreams==='function'){ window._vdo&&(Object.keys(window._vdo.feeds||{}).forEach(pn=>{ if(window._vdo.feeds[pn]) window._vdo.feeds[pn].stopped=false; })); }
   // Clear streams so camera screen shows 'No feed' for next game
@@ -2218,6 +2221,18 @@ function getMode(){ return (S.aq&&S.aq.mode)||'single'; }
 function getSubmode(){ return (S.aq&&S.aq.submode)||'default'; }
 function isFast(){ return getMode()==='multi' && getSubmode()==='fast'; }
 
+// ══════════════════════════════════════════════════════════════════
+// PROJECTOR RENDER — Two-layer architecture to protect camera feeds
+//
+// Layer 1  #proj-vid-layer   z-index:1   Video/iframe elements only
+//                                         Built once, NEVER destroyed
+//                                         Streams survive all re-renders
+//
+// Layer 2  #proj-overlay     z-index:10  All UI: scores, questions,
+//                                         lifelines, controls, overlays
+//                                         innerHTML replaced freely —
+//                                         never touches video elements
+// ══════════════════════════════════════════════════════════════════
 function renderProj(){
   const el=document.getElementById('proj');
   updateFloatBar();
@@ -2226,45 +2241,105 @@ function renderProj(){
   // ── No game ──
   if(!S.gon){
     el.style.cssText='position:relative;width:100%;min-height:calc(100vh - 58px);background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:60px';
-    el.innerHTML='<div style="font-size:70px;opacity:.2;margin-bottom:18px">📺</div>'+'<div style="font-family:Bebas\ Neue,cursive;font-size:40px;letter-spacing:4px;color:rgba(255,255,255,.17);margin-bottom:10px">WAITING FOR HOST</div>'+'<div style="color:rgba(255,255,255,.14);font-size:16px">Admin has not released a game yet.</div>';
+    el.innerHTML='<div style="font-size:70px;opacity:.2;margin-bottom:18px">📺</div>'+'<div style="font-family:Bebas Neue,cursive;font-size:40px;letter-spacing:4px;color:rgba(255,255,255,.17);margin-bottom:10px">WAITING FOR HOST</div>'+'<div style="color:rgba(255,255,255,.14);font-size:16px">Admin has not released a game yet.</div>';
     return;
   }
 
   el.style.cssText='position:relative;width:100%;height:calc(100vh - 58px);background:#000;overflow:hidden;';
+
   const mode=getMode();
   const qd=S.aq&&S.aq.questions&&S.aq.questions[S.curQ||0];
 
-  if(mode==='single'){
-    _renderProjSingle(el, qd);
-  } else {
-    _renderProjMulti(el, qd);
+  // ── Ensure the persistent video layer exists ──
+  // It is only built when the player lineup changes (different names/count)
+  // or on the very first render. Video elements are NEVER destroyed.
+  _ensureProjVideoLayer(el, mode);
+
+  // ── Ensure the overlay div exists ──
+  let overlay=document.getElementById('proj-overlay');
+  if(!overlay){
+    overlay=document.createElement('div');
+    overlay.id='proj-overlay';
+    overlay.style.cssText='position:absolute;inset:0;z-index:10;pointer-events:none;';
+    el.appendChild(overlay);
   }
 
-  // Auto-start WebRTC receive for any players with live cameras
-  // (no-op if already connected or if this is the camera tab itself)
+  // ── Write only the overlay (UI) — never touches video layer ──
+  if(mode==='single'){
+    _renderProjSingleOverlay(overlay, qd);
+  } else {
+    _renderProjMultiOverlay(overlay, qd);
+  }
+
+  // Auto-start WebRTC receive — no-op if already connected
   rtcEnsureReceiving();
 }
 
-// ── SINGLE PLAYER projection ──
-function _renderProjSingle(el, qd){
+// ── Build/update the video layer — only recreates if player lineup changed ──
+function _ensureProjVideoLayer(el, mode){
+  const shown = mode==='single' ? (S.players[0] ? [S.players[0]] : [{name:'__waiting__',emoji:'🎭'}]) : S.players.slice(0,4);
+  const sig   = shown.map(p=>p.name).join('|') + '|' + mode;
+
+  let vidLayer = document.getElementById('proj-vid-layer');
+
+  if(vidLayer && vidLayer.dataset.sig === sig){
+    // Player lineup unchanged — don't touch the video layer at all
+    return;
+  }
+
+  // Build a new video layer (lineup changed or first render)
+  if(vidLayer) vidLayer.remove();
+  vidLayer = document.createElement('div');
+  vidLayer.id = 'proj-vid-layer';
+  vidLayer.dataset.sig = sig;
+
+  if(mode==='single'){
+    const tp = shown[0];
+    vidLayer.style.cssText='position:absolute;inset:0;z-index:1;';
+    vidLayer.innerHTML = _mediaEl('proj-vid-main', tp.name)
+      + '<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.5">'+tp.emoji+'</div>'
+      + '<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.9),transparent);pointer-events:none"></div>';
+    el.insertBefore(vidLayer, el.firstChild);
+    _attachMedia('proj-vid-main', tp.name);
+  } else {
+    vidLayer.style.cssText='position:absolute;inset:0;z-index:1;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr;';
+    let vh='';
+    for(let i=0;i<4;i++){
+      const p=shown[i];
+      const bdr = i<3 ? 'border-right:2px solid rgba(255,255,255,.15)' : '';
+      if(p){
+        const bgGrad=['#12122a,#0a0a1a','#1a1228,#0d0d20','#0a1a12,#0a1209','#1a120a,#120a00'][i]||'#12122a,#0a0a1a';
+        vh+='<div style="position:relative;overflow:hidden;'+bdr+'">'
+          + _mediaEl('proj-vid-'+i, p.name)
+          + '<div id="proj-ph-'+i+'" style="position:absolute;inset:0;background:linear-gradient(160deg,'+bgGrad+');display:flex;align-items:center;justify-content:center;font-size:clamp(48px,6vw,96px);z-index:2;transition:opacity .6s">'+p.emoji+'</div>'
+          + '<div style="position:absolute;inset:0;z-index:3;background:linear-gradient(to bottom,rgba(0,0,0,.5) 0%,transparent 35%,transparent 60%,rgba(0,0,0,.7) 100%);pointer-events:none"></div>'
+          + '</div>';
+      } else {
+        vh+='<div style="background:#07070f;border:1px solid rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;'+bdr+'"><div style="text-align:center;color:rgba(255,255,255,.15)"><div style="font-size:32px;margin-bottom:8px;opacity:.4">👤</div><div style="font-size:13px;font-style:italic">Waiting for player…</div></div></div>';
+      }
+    }
+    vidLayer.innerHTML=vh;
+    el.insertBefore(vidLayer, el.firstChild);
+    shown.forEach((p,i)=>{ if(p && p.name!=='__waiting__') _attachMedia('proj-vid-'+i, p.name); });
+  }
+}
+
+// ── SINGLE PLAYER projection overlay (UI only — video layer is separate) ──
+function _renderProjSingleOverlay(overlay, qd){
   const tp      = S.players[0]||{emoji:'🎭',name:'Waiting for player…',score:0};
   const ll      = S.lifelines||{fifty:false,ask:false,skip:false,hiddenAnswers:[]};
   const hidden  = ll.hiddenAnswers||[];
   const picked  = S.pickedAns;
   const revealed= picked!==null;
   const isOver  = S.gameOver;
+  overlay.style.pointerEvents='none';
   let h='';
 
-  // ── BG video ──
-  h+=_mediaEl('proj-vid-main', tp.name);
-  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.5">'+tp.emoji+'</div>';
-  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.9),transparent);pointer-events:none"></div>';
-
   // ── LIVE badge ──
-  h+='<div style="position:absolute;top:14px;left:14px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
+  h+='<div style="position:absolute;top:14px;left:14px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700;pointer-events:none">● LIVE</div>';
 
   // ── Contestant chip — top left below LIVE ──
-  h+='<div style="position:absolute;top:50px;left:14px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.35);border-radius:12px;padding:8px 14px;backdrop-filter:blur(10px)">';
+  h+='<div style="position:absolute;top:50px;left:14px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.35);border-radius:12px;padding:8px 14px;backdrop-filter:blur(10px);pointer-events:auto">';
   h+='<div style="font-size:8px;color:rgba(255,255,255,.35);letter-spacing:1px;text-transform:uppercase;margin-bottom:1px">Contestant</div>';
   h+='<div style="font-family:Bebas Neue,cursive;font-size:22px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
   h+='<div style="display:flex;align-items:center;gap:6px;margin-top:4px">';
@@ -2281,13 +2356,11 @@ function _renderProjSingle(el, qd){
     const finalScore = tp.score||0;
     const ckpts=[100,50,0];
     const reached = ckpts.find(c=>finalScore>=c)||0;
-    // Show the wrong answer reveal still on the Q, then big overlay
-    h+='<div style="position:absolute;inset:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;">';
+    h+='<div style="position:absolute;inset:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;pointer-events:auto">';
     h+='<div style="text-align:center;max-width:480px;padding:30px 20px">';
     h+='<div style="font-size:72px;margin-bottom:12px">😔</div>';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(34px,6vw,60px);color:var(--danger);letter-spacing:4px;line-height:1;margin-bottom:8px">GAME OVER</div>';
     h+='<div style="font-size:14px;color:rgba(255,255,255,.5);margin-bottom:22px;line-height:1.6">'+x(tp.name)+' answered incorrectly.</div>';
-    // Checkpoint info
     if(finalScore===0&&reached===0){
       h+='<div style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
       h+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">No checkpoint reached</div>';
@@ -2304,7 +2377,7 @@ function _renderProjSingle(el, qd){
       h+='<button onclick="endGame()" style="padding:13px 36px;border-radius:12px;background:var(--accent);border:none;color:#fff;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.5px">End Game</button>';
     }
     h+='</div></div>';
-    // Still render the question behind the overlay so they can see the answer
+    // Show the question/answers behind overlay
     h+='<div style="position:absolute;bottom:16px;left:14px;right:216px;z-index:30;opacity:.55;pointer-events:none">';
     h+='<div style="background:rgba(0,0,0,.95);border:2px solid rgba(231,76,60,.4);border-radius:16px;padding:14px 18px">';
     h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">';
@@ -2320,37 +2393,24 @@ function _renderProjSingle(el, qd){
       h+='</div>';
     });
     h+='</div></div></div>';
-
-    el.innerHTML=h;
-    _attachMedia('proj-vid-main', tp.name);
+    overlay.innerHTML=h;
     return;
   }
 
-  // ── RIGHT SIDE: Ladder — 0 at bottom, +10 per correct answer ──
-  // 16 rungs: 0,10,20…150. Highlighted rung = player's current score.
-  // Safety checkpoints at 50 and 100.
+  // ── RIGHT SIDE: Ladder ──
   const ladderSteps=[0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
   const sf=[50,100];
   const currentScore = tp.score||0;
-  const displaySteps=[...ladderSteps].reverse(); // top of DOM = highest value
-  h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  const displaySteps=[...ladderSteps].reverse();
+  h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden;pointer-events:none">';
   h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
   h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 6px 4px">';
   displaySteps.forEach(v=>{
-    const isCur  = v===currentScore;
-    const isPast = v < currentScore;
-    const isSafe = sf.includes(v);
-    const bg  = isCur  ? 'background:rgba(245,200,66,.22);'
-               : isPast ? 'background:rgba(46,204,113,.06);'
-               : '';
-    const bdr = isCur  ? 'border:1.5px solid rgba(245,200,66,.7);'
-               : isSafe&&!isPast ? 'border:1px solid rgba(46,204,113,.3);'
-               : 'border:1px solid transparent;';
-    const col = isCur  ? 'color:var(--gold);font-weight:700;'
-               : isPast ? 'color:rgba(46,204,113,.6);'
-               : isSafe ? 'color:var(--safe);'
-               : 'color:rgba(255,255,255,.32);';
-    const icon = isCur ? '▶' : isPast ? '✓' : isSafe ? '🛡' : '';
+    const isCur=v===currentScore, isPast=v<currentScore, isSafe=sf.includes(v);
+    const bg  =isCur?'background:rgba(245,200,66,.22);':isPast?'background:rgba(46,204,113,.06);':'';
+    const bdr =isCur?'border:1.5px solid rgba(245,200,66,.7);':isSafe&&!isPast?'border:1px solid rgba(46,204,113,.3);':'border:1px solid transparent;';
+    const col =isCur?'color:var(--gold);font-weight:700;':isPast?'color:rgba(46,204,113,.6);':isSafe?'color:var(--safe);':'color:rgba(255,255,255,.32);';
+    const icon=isCur?'▶':isPast?'✓':isSafe?'🛡':'';
     h+='<div style="display:flex;align-items:center;padding:0 5px;border-radius:5px;flex:1;min-height:16px;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:11px;font-weight:700;">';
     h+='<span style="width:18px;text-align:center;flex-shrink:0;font-size:11px">'+icon+'</span>';
     h+='<span style="flex:1;padding:0 3px;font-size:11px;font-weight:700">'+v+' pts</span>';
@@ -2359,70 +2419,47 @@ function _renderProjSingle(el, qd){
   });
   h+='</div></div>';
 
-  // ── BOTTOM: Question card (left of ladder) ──
-  h+='<div style="position:absolute;bottom:14px;left:14px;right:max(216px,calc(18vw + 16px));z-index:20">';
+  // ── BOTTOM: Question card ──
+  h+='<div style="position:absolute;bottom:14px;left:14px;right:max(216px,calc(18vw + 16px));z-index:20;pointer-events:auto">';
   h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:16px;padding:14px 18px;backdrop-filter:blur(14px)">';
-
-  // Quiz title bar
   h+='<div style="font-family:Space Mono,monospace;color:rgba(245,200,66,.65);font-size:9px;margin-bottom:8px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
 
   if(S.paused){
     h+='<div style="font-size:clamp(18px,2vw,24px);font-weight:700;color:var(--warn);text-align:center;padding:14px 0;letter-spacing:3px">⏸ PAUSED</div>';
   } else {
-
-    // ── LIFELINES — ghost/transparent, floating above question ──
-    // Shown always so audience sees remaining lifelines.
-    // Only clickable by admin. Used ones become near-invisible.
-    const llBtn = (icon, title, used, fn) => {
-      // Active: semi-transparent background, full emoji opacity
-      // Used:   nearly invisible — just a ghost outline
-      const s = used
-        ? 'opacity:.18;filter:grayscale(1);cursor:default;background:transparent;border-color:rgba(255,255,255,.08);'
-        : (S.ain || localStorage.getItem('qs_admin')==='1')
-          ? 'opacity:.85;background:rgba(0,0,0,.35);border-color:rgba(255,255,255,.22);cursor:pointer;'
-          : 'opacity:.75;background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.15);cursor:default;';
-      const llAdmin = S.ain || localStorage.getItem('qs_admin')==='1';
-      const isTextLabel = /^[A-Za-z0-9%:]+$/.test(icon);
-      const iconStyle = isTextLabel ? 'font-size:10px;font-weight:900;font-family:Space Mono,monospace;color:var(--gold);' : 'font-size:20px;';
-      return '<button '+(used||!llAdmin?'disabled':('onclick="'+fn+'()"'))
-        +' title="'+title+'"'
-        +' style="width:44px;height:38px;border-radius:10px;border:1px solid;'+iconStyle
-        +s+'display:flex;align-items:center;justify-content:center;transition:all .25s;backdrop-filter:blur(4px);">'
-        +icon+'</button>';
+    const llBtn=(icon,title,used,fn)=>{
+      const s=used?'opacity:.18;filter:grayscale(1);cursor:default;background:transparent;border-color:rgba(255,255,255,.08);':(S.ain||localStorage.getItem('qs_admin')==='1')?'opacity:.85;background:rgba(0,0,0,.35);border-color:rgba(255,255,255,.22);cursor:pointer;':'opacity:.75;background:rgba(0,0,0,.25);border-color:rgba(255,255,255,.15);cursor:default;';
+      const llAdmin=S.ain||localStorage.getItem('qs_admin')==='1';
+      const isTextLabel=/^[A-Za-z0-9%:]+$/.test(icon);
+      const iconStyle=isTextLabel?'font-size:10px;font-weight:900;font-family:Space Mono,monospace;color:var(--gold);':'font-size:20px;';
+      return '<button '+(used||!llAdmin?'disabled':('onclick="'+fn+'()"'))+' title="'+title+'" style="width:44px;height:38px;border-radius:10px;border:1px solid;'+iconStyle+s+'display:flex;align-items:center;justify-content:center;transition:all .25s;backdrop-filter:blur(4px);">'+icon+'</button>';
     };
     h+='<div style="display:flex;gap:5px;align-items:center;margin-bottom:10px">';
     h+='<span style="font-size:8px;color:rgba(255,255,255,.28);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-right:3px">Lifelines</span>';
-    h+=llBtn('50%','50:50 — Remove two wrong answers', ll.fifty,'useFiftyFifty');
-    h+=llBtn('📞','Ask Anyone — Consult someone',      ll.ask,  'useAskAnyone');
-    h+=llBtn('⏭️','Skip — Pass this question',         ll.skip, 'useSkip');
+    h+=llBtn('50%','50:50 — Remove two wrong answers',ll.fifty,'useFiftyFifty');
+    h+=llBtn('📞','Ask Anyone — Consult someone',ll.ask,'useAskAnyone');
+    h+=llBtn('⏭️','Skip — Pass this question',ll.skip,'useSkip');
     h+='</div>';
 
-    // Question text
     h+='<div style="font-size:clamp(11px,1.3vw,17px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:10px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
 
-    // Answers grid — 2×2
-    // Admin clicks to pick the answer; others see result only
-    const isAdminHere = S.ain || localStorage.getItem('qs_admin')==='1';
+    const isAdminHere=S.ain||localStorage.getItem('qs_admin')==='1';
     h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
     (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
-      const isHidden  = hidden.includes(i) && !revealed;
-      const isCorrect = qd && i===qd.correct;
-      const isPicked  = picked!==null && i===picked;
-      const isWrong   = isPicked && !isCorrect;
+      const isHidden=hidden.includes(i)&&!revealed, isCorrect=qd&&i===qd.correct, isPicked=picked!==null&&i===picked, isWrong=isPicked&&!isCorrect;
       let bg,bdr,col;
-      if(isHidden){       bg='rgba(255,255,255,.02)'; bdr='rgba(255,255,255,.04)'; col='rgba(255,255,255,.1)'; }
-      else if(!revealed){ bg='rgba(255,255,255,.07)'; bdr='rgba(255,255,255,.13)'; col='#fff'; }
-      else if(isCorrect){ bg='rgba(46,204,113,.22)';  bdr='rgba(46,204,113,.85)';  col='var(--safe)'; }
-      else if(isWrong){   bg='rgba(231,76,60,.18)';   bdr='rgba(231,76,60,.8)';    col='var(--danger)'; }
-      else{               bg='rgba(255,255,255,.03)'; bdr='rgba(255,255,255,.05)'; col='rgba(255,255,255,.22)'; }
-      const lBg  = isHidden?'rgba(255,255,255,.04)':!revealed?'rgba(255,255,255,.1)':isCorrect?'rgba(46,204,113,.35)':isWrong?'rgba(231,76,60,.35)':'rgba(255,255,255,.05)';
-      const lCol = isHidden?'rgba(255,255,255,.1)':!revealed?'var(--gold)':isCorrect?'var(--safe)':isWrong?'var(--danger)':'rgba(255,255,255,.18)';
-      const shadow=(isCorrect&&revealed)?'box-shadow:0 0 14px rgba(46,204,113,.3);':(isWrong)?'box-shadow:0 0 12px rgba(231,76,60,.28);':'';
-      // Only admin can click; use <button> for guaranteed click handling
-      const canClick = isAdminHere && !revealed && !isHidden;
-      const tag = canClick ? 'button' : 'div';
-      const clickAttr = canClick ? 'onclick="projPickAnswer('+i+')"' : '';
-      const cursorStyle = canClick ? 'cursor:pointer;' : 'cursor:default;';
+      if(isHidden){bg='rgba(255,255,255,.02)';bdr='rgba(255,255,255,.04)';col='rgba(255,255,255,.1)';}
+      else if(!revealed){bg='rgba(255,255,255,.07)';bdr='rgba(255,255,255,.13)';col='#fff';}
+      else if(isCorrect){bg='rgba(46,204,113,.22)';bdr='rgba(46,204,113,.85)';col='var(--safe)';}
+      else if(isWrong){bg='rgba(231,76,60,.18)';bdr='rgba(231,76,60,.8)';col='var(--danger)';}
+      else{bg='rgba(255,255,255,.03)';bdr='rgba(255,255,255,.05)';col='rgba(255,255,255,.22)';}
+      const lBg=isHidden?'rgba(255,255,255,.04)':!revealed?'rgba(255,255,255,.1)':isCorrect?'rgba(46,204,113,.35)':isWrong?'rgba(231,76,60,.35)':'rgba(255,255,255,.05)';
+      const lCol=isHidden?'rgba(255,255,255,.1)':!revealed?'var(--gold)':isCorrect?'var(--safe)':isWrong?'var(--danger)':'rgba(255,255,255,.18)';
+      const shadow=(isCorrect&&revealed)?'box-shadow:0 0 14px rgba(46,204,113,.3);':isWrong?'box-shadow:0 0 12px rgba(231,76,60,.28);':'';
+      const canClick=isAdminHere&&!revealed&&!isHidden;
+      const tag=canClick?'button':'div';
+      const clickAttr=canClick?'onclick="projPickAnswer('+i+')"':'';
+      const cursorStyle=canClick?'cursor:pointer;':'cursor:default;';
       h+='<'+tag+' '+clickAttr+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:10px;padding:8px 11px;display:flex;align-items:center;gap:7px;transition:all .3s;width:100%;text-align:left;'+cursorStyle+shadow+'">';
       h+='<div style="width:24px;height:24px;border-radius:5px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
       h+='<div style="font-size:11px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
@@ -2432,8 +2469,7 @@ function _renderProjSingle(el, qd){
     });
     h+='</div>';
 
-    // Post-answer controls (correct path only — wrong triggers game-over overlay above)
-    if(revealed && S.ain && !isOver){
+    if(revealed&&S.ain&&!isOver){
       const isLastQ=(S.curQ||0)>=(S.aq.questions?S.aq.questions.length-1:0);
       if(!isLastQ){
         h+='<div style="margin-top:9px;text-align:center"><button onclick="projNextQuestion()" style="padding:7px 22px;border-radius:9px;background:var(--accent);border:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer">▶ Next Question</button></div>';
@@ -2442,47 +2478,33 @@ function _renderProjSingle(el, qd){
       }
     }
   }
-
   h+='</div></div>';
-  el.innerHTML=h;
-  _attachMedia('proj-vid-main', tp.name);
+  overlay.innerHTML=h;
 }
 
-// ── MULTIPLAYER projection ──
-// 4 quadrants | bonus round overlay when S.mpBonus is active
-function _renderProjMulti(el, qd){
+// ── MULTIPLAYER projection overlay (UI only — video layer is separate) ──
+function _renderProjMultiOverlay(overlay, qd){
   const shown=S.players.slice(0,4);
+  overlay.style.pointerEvents='none';
   let h='';
 
-  // 4-quadrant grid
-  h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr;z-index:1">';
+  // Per-player UI overlays (name, score, badges) — absolutely positioned over each quadrant
+  const quadW = 100/4;
   shown.forEach((p,i)=>{
     const score=p.score||0;
-    // Vertical divider lines between the 4 strips — right border acts as separator
-    const bdr = i < 3 ? 'border-right:2px solid rgba(255,255,255,.15)' : '';
-    h+='<div style="position:relative;overflow:hidden;'+bdr+'">';
+    const left=(i*quadW)+'%';
+    const width=quadW+'%';
 
-    // Video/canvas background
-    h+=_mediaEl('proj-vid-'+i, p.name);
+    // LIVE badge — top left of quadrant
+    h+='<div style="position:absolute;top:10px;left:calc('+left+' + 10px);z-index:30;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 9px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;letter-spacing:.5px;pointer-events:none">● LIVE</div>';
 
-    // Emoji placeholder
-    const bg=['#12122a,#0a0a1a','#1a1228,#0d0d20','#0a1a12,#0a1209','#1a120a,#120a00'][i]||'#12122a,#0a0a1a';
-    h+='<div id="proj-ph-'+i+'" style="position:absolute;inset:0;background:linear-gradient(160deg,'+bg+');display:flex;align-items:center;justify-content:center;font-size:clamp(48px,6vw,96px);z-index:2;transition:opacity .6s">'+p.emoji+'</div>';
+    // Player name — top centre of quadrant
+    h+='<div style="position:absolute;top:10px;left:'+left+';width:'+width+';display:flex;justify-content:center;z-index:30;pointer-events:none">';
+    h+='<div style="background:rgba(0,0,0,.75);border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:5px 16px;backdrop-filter:blur(8px);white-space:nowrap">';
+    h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(16px,1.8vw,24px);color:#fff;letter-spacing:1px;line-height:1">'+x(p.name)+'</div></div></div>';
 
-    // Vignette
-    h+='<div style="position:absolute;inset:0;z-index:3;background:linear-gradient(to bottom,rgba(0,0,0,.5) 0%,transparent 35%,transparent 60%,rgba(0,0,0,.7) 100%);pointer-events:none"></div>';
-
-    // LIVE badge — top left
-    h+='<div style="position:absolute;top:10px;left:10px;z-index:30;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 9px;border-radius:20px;animation:pulse 2s infinite;font-weight:700;letter-spacing:.5px">● LIVE</div>';
-
-    // Player name — top centre
-    h+='<div style="position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:30;background:rgba(0,0,0,.75);border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:5px 16px;backdrop-filter:blur(8px);white-space:nowrap">';
-    h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(16px,1.8vw,24px);color:#fff;letter-spacing:1px;line-height:1">'+x(p.name)+'</div></div>';
-
-    // Score — bottom right + admin +/−
-    h+='<div style="position:absolute;bottom:14px;right:14px;z-index:30;display:flex;align-items:center;gap:8px">';
-    if(S.ain){
-    }
+    // Score + admin controls — bottom right of quadrant
+    h+='<div style="position:absolute;bottom:14px;right:calc('+(100-(i+1)*quadW)+'% + 14px);z-index:30;display:flex;align-items:center;gap:8px;pointer-events:auto">';
     h+='<div style="background:rgba(0,0,0,.9);border:2px solid rgba(245,200,66,.65);border-radius:13px;padding:8px 18px;backdrop-filter:blur(8px);text-align:center;min-width:80px">';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(26px,3vw,42px);color:var(--gold);line-height:1;letter-spacing:1px">'+score+'</div>';
     h+='<div style="font-size:10px;color:rgba(245,200,66,.7);letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-top:2px">PTS</div></div>';
@@ -2496,29 +2518,33 @@ function _renderProjMulti(el, qd){
     }
     h+='</div>';
 
-    // Bonus badge in top-right of each quadrant when bonus is live
+    // Bonus badge — top right of quadrant
     if(S.mpBonus){
-      h+='<div style="position:absolute;top:10px;right:10px;z-index:35;background:rgba(245,200,66,.2);border:1px solid rgba(245,200,66,.6);border-radius:8px;padding:3px 9px;font-size:9px;font-family:Space Mono,monospace;color:var(--gold);animation:pulse 2s infinite;font-weight:700">+3 BONUS</div>';
+      h+='<div style="position:absolute;top:10px;right:calc('+(100-(i+1)*quadW)+'% + 10px);z-index:35;background:rgba(245,200,66,.2);border:1px solid rgba(245,200,66,.6);border-radius:8px;padding:3px 9px;font-size:9px;font-family:Space Mono,monospace;color:var(--gold);animation:pulse 2s infinite;font-weight:700;pointer-events:none">+3 BONUS</div>';
     }
 
-    h+='</div>'; // end quadrant
+    // Buzz-in winner badge
+    if(typeof isFast==='function'&&isFast()&&S.buzzed&&p.name===S.buzzed){
+      h+='<div style="position:absolute;bottom:12px;left:calc('+left+' + 12px);z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700;pointer-events:none">BUZZED IN</div>';
+    }
   });
-
-  // Fill empty slots
-  for(let i=shown.length;i<4;i++){
-    h+='<div style="background:#07070f;border:1px solid rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center"><div style="text-align:center;color:rgba(255,255,255,.15)"><div style="font-size:32px;margin-bottom:8px;opacity:.4">👤</div><div style="font-size:13px;font-style:italic">Waiting for player…</div></div></div>';
-  }
-  h+='</div>';
 
   // ── Paused overlay ──
   if(S.paused){
-    h+='<div style="position:absolute;inset:0;z-index:50;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)">';
+    h+='<div style="position:absolute;inset:0;z-index:50;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);pointer-events:none">';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(40px,7vw,90px);color:var(--warn);letter-spacing:6px;text-shadow:0 0 40px rgba(243,156,18,.5)">⏸ PAUSED</div></div>';
   }
 
-  // ── BONUS ROUND OVERLAY — centred panel, admin awards +3 per correct guess ──
-  if(S.mpBonus && S.ain && shown.length > 0){
-    h+='<div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:60;min-width:320px;max-width:500px">';
+  // ── Fast mode: Next Question button ──
+  if(typeof isFast==='function'&&isFast()&&S.buzzed&&S.ain){
+    h+='<div style="position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60;pointer-events:auto">';
+    h+='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';
+    h+='</div>';
+  }
+
+  // ── BONUS ROUND OVERLAY ──
+  if(S.mpBonus&&S.ain&&shown.length>0){
+    h+='<div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:60;min-width:320px;max-width:500px;pointer-events:auto">';
     h+='<div style="background:rgba(0,0,0,.94);border:2px solid rgba(245,200,66,.6);border-radius:18px;padding:16px 20px;backdrop-filter:blur(16px);box-shadow:0 8px 40px rgba(245,200,66,.15)">';
     h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">';
     h+='<span style="font-size:20px;animation:pulse 2s infinite">🎁</span>';
@@ -2534,13 +2560,12 @@ function _renderProjMulti(el, qd){
         +'<span style="font-size:10px;color:var(--safe);font-family:Space Mono,monospace">+3 pts</span>'
         +'</button>';
     });
-    h+='</div>';
-    h+='</div></div>';
+    h+='</div></div></div>';
   }
 
-  // ── Bonus round banner for spectators (non-admin) ──
-  if(S.mpBonus && !S.ain){
-    h+='<div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:60">';
+  // ── Bonus round banner for non-admin ──
+  if(S.mpBonus&&!S.ain){
+    h+='<div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:60;pointer-events:none">';
     h+='<div style="background:rgba(0,0,0,.9);border:2px solid rgba(245,200,66,.55);border-radius:14px;padding:12px 24px;backdrop-filter:blur(12px);text-align:center">';
     h+='<div style="font-size:22px;margin-bottom:4px;animation:pulse 2s infinite">🎁</div>';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:20px;color:var(--gold);letter-spacing:3px">BONUS ROUND</div>';
@@ -2548,9 +2573,7 @@ function _renderProjMulti(el, qd){
     h+='</div></div>';
   }
 
-  el.innerHTML=h;
-  shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
-  if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr 1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
+  overlay.innerHTML=h;
 }
 
 
@@ -3148,12 +3171,12 @@ function projNextQuestion(){
     S.curStep = steps[S.curQ] || steps[steps.length-1];
     if(window._fb&&window._fb.ready())
       window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null, lifelines:S.lifelines, mpBonus:false });
-    renderProj(); _rewireAllStreams(); renderSession(); updateFloatBar();
+    renderProj(); renderSession(); updateFloatBar();
     toast('▶ Q'+(S.curQ+1),'ok');
   } else {
     S.pickedAns = null;
     toast('🏁 Quiz complete!','ok');
-    renderProj(); _rewireAllStreams(); renderSession(); updateFloatBar();
+    renderProj(); renderSession(); updateFloatBar();
   }
 }
 
@@ -3165,7 +3188,7 @@ function sessionNext(){
   const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null });
-  renderSession();renderProj();_rewireAllStreams();updateFloatBar();
+  renderSession();renderProj();updateFloatBar();
   toast('Moved to Q'+(S.curQ+1),'ok');
 }
 function sessionPause(){
