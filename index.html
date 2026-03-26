@@ -2063,6 +2063,33 @@ function attachStream(videoEl, playerName){
 // ── no-op legacy shim ──
 async function requestCameraForPlayer(){ return null; }
 
+// ── Create and attach a media element directly into a container DOM node ──
+function _attachMediaInSlot(id, pname, container){
+  if(!container) return;
+  const stream  = S.streams && S.streams[pname];
+  const viewUrl = stream==='vdo' && typeof vdoViewUrl==='function' ? vdoViewUrl(pname) : '';
+  let el;
+  if(stream==='vdo' && viewUrl){
+    el = document.createElement('iframe');
+    el.src = viewUrl;
+    el.allow = 'camera;microphone;autoplay;fullscreen';
+    el.allowFullscreen = true;
+  } else {
+    el = document.createElement('video');
+    el.autoplay = true;
+    el.playsInline = true;
+    el.muted = true;
+    if(stream instanceof MediaStream){ el.srcObject = stream; el.play().catch(()=>{}); }
+  }
+  el.id = id;
+  el.setAttribute('data-player', pname);
+  el.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;border:none;background:#000';
+  container.insertBefore(el, container.firstChild);
+  // Hide placeholder
+  const ph = document.getElementById(id==='proj-vid-main'?'proj-vid-ph':id.replace('proj-vid-','proj-ph-'));
+  if(ph && (stream instanceof MediaStream || stream==='vdo')){ ph.style.opacity='0'; setTimeout(()=>{if(ph)ph.style.display='none';},500); }
+}
+
 // ── Build the right media element for a player slot ──
 // Always <video> so WebRTC MediaStream can be assigned via srcObject.
 // Canvas was the old approach for BroadcastChannel relay — WebRTC doesn't need it.
@@ -2102,7 +2129,12 @@ function _attachMedia(id, pname){
   const el = document.getElementById(id);
   if(!el) return;
   // VDO.Ninja — iframe handles its own src, nothing to wire
-  if(S.streams[pname] === 'vdo') return;
+  if(S.streams[pname] === 'vdo'){
+    // Hide the placeholder so the iframe shows through
+    const phVdo = id==='proj-vid-main' ? document.getElementById('proj-vid-ph') : document.getElementById(id.replace('proj-vid-','proj-ph-'));
+    if(phVdo){ phVdo.style.opacity='0'; phVdo.style.transition='opacity .3s'; setTimeout(()=>{if(phVdo)phVdo.style.display='none';},300); }
+    return;
+  }
 
   const stream = S.streams[pname];
 
@@ -2227,36 +2259,39 @@ function _renderProjSingle(el, qd){
   const picked  = S.pickedAns;
   const revealed= picked!==null;
   const isOver  = S.gameOver;
+
+  // ── Detach existing media node BEFORE innerHTML so it survives the rebuild ──
+  const _existingMedia = document.getElementById('proj-vid-main');
+  if(_existingMedia) _existingMedia.remove();
+
   let h='';
 
-  // ── BG video ──
-  h+=_mediaEl('proj-vid-main', tp.name);
-  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.5">'+tp.emoji+'</div>';
-  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.9),transparent);pointer-events:none"></div>';
-
-  // ── LIVE badge ──
-  h+='<div style="position:absolute;top:14px;left:14px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
-
-  // ── Contestant chip — top left below LIVE ──
-  h+='<div style="position:absolute;top:50px;left:14px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.35);border-radius:12px;padding:8px 14px;backdrop-filter:blur(10px)">';
+  // ── TOP: Camera feed container (full width, landscape-friendly) ──
+  // Media element will be re-inserted here after innerHTML
+  h+='<div id="proj-cam-top" style="position:absolute;top:0;left:0;right:0;height:44%;background:#000;overflow:hidden;z-index:1">';
+  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(60px,8vw,120px);opacity:.45">'+tp.emoji+'</div>';
+  // LIVE badge
+  h+='<div style="position:absolute;top:10px;left:12px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
+  // Contestant chip overlaid bottom-left of camera
+  h+='<div style="position:absolute;bottom:10px;left:12px;z-index:20;background:rgba(0,0,0,.82);border:1px solid rgba(245,200,66,.35);border-radius:10px;padding:6px 12px;backdrop-filter:blur(10px)">';
   h+='<div style="font-size:8px;color:rgba(255,255,255,.35);letter-spacing:1px;text-transform:uppercase;margin-bottom:1px">Contestant</div>';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:22px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
-  h+='<div style="display:flex;align-items:center;gap:6px;margin-top:4px">';
-  h+='<span style="font-family:Space Mono,monospace;font-size:14px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:20px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
+  h+='<div style="display:flex;align-items:center;gap:6px;margin-top:3px">';
+  h+='<span style="font-family:Space Mono,monospace;font-size:13px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
   if(S.ain&&!isOver){
-    h+='<input id="pts-inp-sp" type="number" min="1" value="10" style="width:42px;padding:2px 4px;border-radius:5px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.5);color:#fff;font-family:Space Mono,monospace;font-size:11px;font-weight:700;text-align:center;outline:none;margin-left:4px">';
-    h+='<button onclick="adjScoreInputSP(false)" style="width:22px;height:22px;border-radius:5px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.2);color:#fff;font-size:13px;font-weight:900;cursor:pointer;line-height:1">−</button>';
-    h+='<button onclick="adjScoreInputSP(true)" style="width:22px;height:22px;border-radius:5px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.2);color:#fff;font-size:13px;font-weight:900;cursor:pointer;line-height:1">+</button>';
+    h+='<input id="pts-inp-sp" type="number" min="1" value="10" style="width:40px;padding:2px 3px;border-radius:5px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.5);color:#fff;font-family:Space Mono,monospace;font-size:10px;font-weight:700;text-align:center;outline:none;margin-left:4px">';
+    h+='<button onclick="adjScoreInputSP(false)" style="width:20px;height:20px;border-radius:5px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.2);color:#fff;font-size:12px;font-weight:900;cursor:pointer;line-height:1">−</button>';
+    h+='<button onclick="adjScoreInputSP(true)" style="width:20px;height:20px;border-radius:5px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.2);color:#fff;font-size:12px;font-weight:900;cursor:pointer;line-height:1">+</button>';
   }
   h+='</div></div>';
+  h+='</div>'; // end proj-cam-top
 
   // ── GAME OVER OVERLAY ──
   if(isOver){
     const finalScore = tp.score||0;
     const ckpts=[100,50,0];
     const reached = ckpts.find(c=>finalScore>=c)||0;
-    // Show the wrong answer reveal still on the Q, then big overlay
-    h+='<div style="position:absolute;inset:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;">';
+    h+='<div style="position:absolute;top:44%;left:0;right:0;bottom:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;">';
     h+='<div style="text-align:center;max-width:480px;padding:30px 20px">';
     h+='<div style="font-size:72px;margin-bottom:12px">😔</div>';
     h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(34px,6vw,60px);color:var(--danger);letter-spacing:4px;line-height:1;margin-bottom:8px">GAME OVER</div>';
@@ -2279,7 +2314,7 @@ function _renderProjSingle(el, qd){
     }
     h+='</div></div>';
     // Still render the question behind the overlay so they can see the answer
-    h+='<div style="position:absolute;bottom:16px;left:14px;right:216px;z-index:30;opacity:.55;pointer-events:none">';
+    h+='<div style="position:absolute;bottom:8px;left:14px;right:max(216px,calc(18vw+16px));z-index:30;opacity:.55;pointer-events:none">';
     h+='<div style="background:rgba(0,0,0,.95);border:2px solid rgba(231,76,60,.4);border-radius:16px;padding:14px 18px">';
     h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">';
     if(qd) qd.answers.forEach((a,i)=>{
@@ -2296,7 +2331,15 @@ function _renderProjSingle(el, qd){
     h+='</div></div></div>';
 
     el.innerHTML=h;
-    _attachMedia('proj-vid-main', tp.name);
+    // Re-insert detached media node into camera slot
+    const _camSlot1 = document.getElementById('proj-cam-top');
+    if(_camSlot1 && _existingMedia){
+      _existingMedia.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;border:none';
+      _camSlot1.insertBefore(_existingMedia, _camSlot1.firstChild);
+    } else {
+      const _newMedia1 = document.createElement(_mediaEl('proj-vid-main',tp.name).startsWith('<iframe')?'iframe':'video');
+      _attachMediaInSlot('proj-vid-main', tp.name, _camSlot1);
+    }
     return;
   }
 
@@ -2307,7 +2350,7 @@ function _renderProjSingle(el, qd){
   const sf=[50,100];
   const currentScore = tp.score||0;
   const displaySteps=[...ladderSteps].reverse(); // top of DOM = highest value
-  h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  h+='<div style="position:absolute;top:calc(44% + 8px);right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
   h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
   h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 6px 4px">';
   displaySteps.forEach(v=>{
@@ -2334,7 +2377,7 @@ function _renderProjSingle(el, qd){
   h+='</div></div>';
 
   // ── BOTTOM: Question card (left of ladder) ──
-  h+='<div style="position:absolute;bottom:14px;left:14px;right:max(216px,calc(18vw + 16px));z-index:20">';
+  h+='<div style="position:absolute;top:calc(44% + 8px);left:14px;right:max(216px,calc(18vw + 16px));bottom:14px;z-index:20;overflow-y:auto">';
   h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:16px;padding:14px 18px;backdrop-filter:blur(14px)">';
 
   // Quiz title bar
@@ -2419,7 +2462,18 @@ function _renderProjSingle(el, qd){
 
   h+='</div></div>';
   el.innerHTML=h;
-  _attachMedia('proj-vid-main', tp.name);
+  // Re-insert detached media node — prevents iframe from being destroyed/recreated
+  const _camSlot = document.getElementById('proj-cam-top');
+  if(_camSlot && _existingMedia){
+    _existingMedia.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;border:none';
+    _camSlot.insertBefore(_existingMedia, _camSlot.firstChild);
+    // Hide placeholder since we have a live feed
+    const _ph = document.getElementById('proj-vid-ph');
+    if(_ph) _ph.style.opacity='0';
+  } else {
+    // No existing media — create fresh
+    _attachMediaInSlot('proj-vid-main', tp.name, _camSlot);
+  }
 }
 
 // ── MULTIPLAYER projection ──
@@ -2429,7 +2483,7 @@ function _renderProjMulti(el, qd){
   let h='';
 
   // 4-quadrant grid
-  h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;z-index:1">';
+  h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr;z-index:1">';
   shown.forEach((p,i)=>{
     const score=p.score||0;
     const bdr=i===0?'2px solid rgba(245,200,66,.4)':'1px solid rgba(255,255,255,.08)';
@@ -2521,9 +2575,33 @@ function _renderProjMulti(el, qd){
     h+='</div></div>';
   }
 
+  // Save existing iframe nodes before innerHTML wipes them
+  const _savedIframes = {};
+  shown.forEach((p,i)=>{
+    const ex = document.getElementById('proj-vid-'+i);
+    if(ex && ex.tagName==='IFRAME') _savedIframes[i]=ex;
+    if(ex) ex.remove(); // detach before innerHTML
+  });
+
   el.innerHTML=h;
-  shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
-  if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
+
+  // Re-insert iframes or attach fresh media
+  shown.forEach((p,i)=>{
+    const slot = document.getElementById('proj-vid-'+i);
+    const container = slot ? slot.parentNode : null;
+    if(_savedIframes[i] && container){
+      _savedIframes[i].id = 'proj-vid-'+i;
+      _savedIframes[i].setAttribute('data-player', p.name);
+      _savedIframes[i].style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;border:none;background:#000';
+      if(slot) slot.parentNode.replaceChild(_savedIframes[i], slot);
+      // Hide placeholder
+      const ph2 = document.getElementById('proj-ph-'+i);
+      if(ph2){ ph2.style.opacity='0'; setTimeout(()=>{if(ph2)ph2.style.display='none';},300); }
+    } else {
+      _attachMedia('proj-vid-'+i, p.name);
+    }
+  });
+  if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr 1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
 }
 
 
