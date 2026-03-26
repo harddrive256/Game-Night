@@ -1059,12 +1059,26 @@ function renderOverview(){
     h+='<div>'+(S.gon?'Share code <b style="color:var(--gold)">'+x(S.gc)+'</b> — no players yet.':'Release a game first.')+'</div></div>';
   } else {
     h+='<div>';
-    S.players.forEach((p,i)=>{h+='<div class="player-row" style="background:var(--card)"><div style="width:23px;text-align:center;font-family:Bebas Neue,cursive;font-size:16px;color:var(--muted)">'+(i+1)+'</div><div class="player-avi">'+p.emoji+'</div><div style="flex:1;font-size:14px;font-weight:600">'+x(p.name)+'</div><div class="odot"></div></div>';});
+    S.players.forEach((p,i)=>{h+='<div class="player-row" style="background:var(--card)"><div style="width:23px;text-align:center;font-family:Bebas Neue,cursive;font-size:16px;color:var(--muted)">'+(i+1)+'</div><div class="player-avi">'+p.emoji+'</div><div style="flex:1;font-size:14px;font-weight:600">'+x(p.name)+'</div>'+(S.ain?'<button onclick="removePlayer(\''+x(p.name).replace(/'/g,"\\'")+'\')" title="Remove player" style="background:rgba(231,76,60,.15);border:1px solid rgba(231,76,60,.4);color:var(--danger);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:700;cursor:pointer;flex-shrink:0">✕</button>':'')+'<div class="odot"></div></div>';});
     h+='</div>';
   }
   document.getElementById('ap-overview').innerHTML=h;
 }
 function sc(num,lbl,trend,tc,nc){return '<div class="scard"><div class="snum" style="color:'+(nc||'var(--gold)')+'">'+num+'</div><div class="slbl">'+lbl+'</div><div class="strend" style="color:'+tc+'">'+trend+'</div></div>';}
+
+// ── Remove a single player from the game ──
+function removePlayer(playerName){
+  if(!S.ain||!S.gon) return;
+  if(!confirm('Remove "'+playerName+'" from the game?')) return;
+  S.players = S.players.filter(p=>p.name!==playerName);
+  if(window._fb&&window._fb.ready()){
+    const { ref, remove } = window._fbMod || {};
+    // Use pushPlayers to overwrite with updated list
+    window._fb.pushPlayers(S.players);
+  }
+  renderOverview(); renderLobby(); renderSession(); renderProj(); updateFloatBar();
+  toast(playerName+' removed from game.','nf');
+}
 
 // ═══ GAME RELEASE ═══
 function releaseGame(){
@@ -3049,6 +3063,7 @@ function renderSession(){
         h+='<span style="font-family:\'Space Mono\',monospace;font-size:13px;color:var(--gold);min-width:44px;text-align:center">'+(p.score||0)+'</span>';
         h+='<button class="btn btn-xs btn-safe" onclick="adjScore('+i+',10)">+10</button>';
         if(S.mpBonus){ h+='<button style="background:rgba(245,200,66,.15);border:1px solid rgba(245,200,66,.4);color:var(--gold);border-radius:6px;padding:3px 7px;font-size:10px;font-weight:700;cursor:pointer" onclick="mpBonusAward('+i+')">+3🎁</button>'; }
+        h+='<button onclick="removePlayer(\''+p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\')" title="Remove player" style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.35);color:var(--danger);border-radius:6px;padding:3px 7px;font-size:11px;font-weight:700;cursor:pointer">✕</button>';
         h+='</div>';
       });
       h+='</div>';
@@ -3133,12 +3148,12 @@ function projNextQuestion(){
     S.curStep = steps[S.curQ] || steps[steps.length-1];
     if(window._fb&&window._fb.ready())
       window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null, lifelines:S.lifelines, mpBonus:false });
-    renderProj(); renderSession(); updateFloatBar();
+    renderProj(); _rewireAllStreams(); renderSession(); updateFloatBar();
     toast('▶ Q'+(S.curQ+1),'ok');
   } else {
     S.pickedAns = null;
     toast('🏁 Quiz complete!','ok');
-    renderProj(); renderSession(); updateFloatBar();
+    renderProj(); _rewireAllStreams(); renderSession(); updateFloatBar();
   }
 }
 
@@ -3150,7 +3165,7 @@ function sessionNext(){
   const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null });
-  renderSession();renderProj();updateFloatBar();
+  renderSession();renderProj();_rewireAllStreams();updateFloatBar();
   toast('Moved to Q'+(S.curQ+1),'ok');
 }
 function sessionPause(){
@@ -3552,6 +3567,11 @@ function renderFastPlayerScreen(){
   const myScore=me?(me.score||0):0;
   let h='<div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f,#0d0c1e);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:22px;text-align:center">';
   h+='<div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 22px;display:flex;align-items:center;gap:12px"><div style="font-size:26px">'+(me?me.emoji:'🎮')+'</div><div><div style="font-family:Bebas Neue,cursive;font-size:20px;color:var(--gold);">'+x(S.me)+'</div><div style="font-size:11px;color:var(--muted)">Score: <span style="color:var(--safe);font-weight:700">'+myScore+' pts</span></div></div></div>';
+  // Person icon
+  h += '<svg viewBox="0 0 200 220" xmlns="http://www.w3.org/2000/svg" style="width:min(100%,160px);height:auto;opacity:0.13;display:block">';
+  h += '<circle cx="100" cy="72" r="52" fill="rgba(255,255,255,0.9)"/>';
+  h += '<path d="M10 220 Q10 140 100 140 Q190 140 190 220Z" fill="rgba(255,255,255,0.9)"/>';
+  h += '</svg>';
   if(!locked){
     h+='<button class="buzz-btn'+(isBuzzer?' winner':'')+' " '+(isBuzzer?'disabled':'')+' onclick="doBuzz()">BUZZ!</button>';
     if(isBuzzer) h+='<div style="font-size:15px;font-weight:700;color:var(--safe)">You buzzed in!</div>';
@@ -3588,6 +3608,14 @@ function renderMultiPlayerView(){
     // Quiz header
     h+='<div style="background:rgba(91,76,255,.08);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:7px 13px;font-family:Space Mono,monospace;font-size:10px;color:rgba(245,200,66,.7);letter-spacing:1px;flex-shrink:0">';
     h+='Q'+((S.curQ||0)+1)+' / '+(S.aq&&S.aq.questions?S.aq.questions.length:0)+'</div>';
+
+    // Person icon — matches the single player mode visual above questions
+    h += '<div style="flex:1;display:flex;align-items:center;justify-content:center;min-height:0;overflow:hidden;flex-shrink:1">';
+    h += '<svg viewBox="0 0 200 220" xmlns="http://www.w3.org/2000/svg" style="width:min(100%,180px);height:auto;opacity:0.13;display:block">';
+    h += '<circle cx="100" cy="72" r="52" fill="rgba(255,255,255,0.9)"/>';
+    h += '<path d="M10 220 Q10 140 100 140 Q190 140 190 220Z" fill="rgba(255,255,255,0.9)"/>';
+    h += '</svg>';
+    h += '</div>';
 
     // Question text
     h+='<div style="background:rgba(0,0,0,.5);border:2px solid rgba(91,76,255,.35);border-radius:14px;padding:16px 18px;font-size:clamp(14px,2vw,20px);font-weight:600;line-height:1.55;color:#fff;flex-shrink:0">'+x(qd.text)+'</div>';
