@@ -699,10 +699,27 @@ body { overflow-x: hidden; min-width: 0; }
           <div style="font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-bottom:8px">Preview</div>
           <div id="import-preview-list" style="max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:6px"></div>
         </div>
-        <!-- Target quiz name -->
-        <div class="ig" style="margin-bottom:0">
+        <!-- Target quiz name + mode -->
+        <div class="ig">
           <label class="lbl">Import into quiz named</label>
           <input class="ifield" id="import-quiz-name" placeholder="e.g. General Knowledge Round 1">
+        </div>
+        <div class="ig" style="margin-bottom:0">
+          <label class="lbl">Game Mode</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:4px">
+            <label style="display:flex;align-items:center;gap:8px;background:var(--panel);border:2px solid rgba(91,76,255,.4);border-radius:10px;padding:10px 12px;cursor:pointer">
+              <input type="radio" name="import-mode" value="single" checked style="accent-color:var(--accent)">
+              <div><div style="font-size:13px;font-weight:600;color:var(--text)">👤 Single</div><div style="font-size:10px;color:var(--muted)">One contestant</div></div>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;background:var(--panel);border:2px solid var(--border);border-radius:10px;padding:10px 12px;cursor:pointer">
+              <input type="radio" name="import-mode" value="multi-default" style="accent-color:var(--gold)">
+              <div><div style="font-size:13px;font-weight:600;color:var(--text)">👥 Multi</div><div style="font-size:10px;color:var(--muted)">Default mode</div></div>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;background:var(--panel);border:2px solid var(--border);border-radius:10px;padding:10px 12px;cursor:pointer">
+              <input type="radio" name="import-mode" value="multi-fast" style="accent-color:var(--danger)">
+              <div><div style="font-size:13px;font-weight:600;color:var(--text)">⚡ Fast</div><div style="font-size:10px;color:var(--muted)">Buzz-in mode</div></div>
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -1073,6 +1090,13 @@ function releaseGame(){
 }
 function launchProjection(){
   S.launched = true;
+  // Kill all Camera Feeds preview iframes BEFORE going to projector.
+  // VDO.Ninja only allows one simultaneous viewer per stream — if the admin
+  // preview iframe is active it blocks the projector iframe from connecting.
+  document.querySelectorAll('iframe[id^="vdo-frame-"]').forEach(f => {
+    f.src = 'about:blank';
+    f.remove();
+  });
   if(typeof vdoUpdateStreams === 'function') vdoUpdateStreams();
   if(window._fb && window._fb.ready()){
     window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:false, revealAns:S.revealAns,
@@ -1080,12 +1104,10 @@ function launchProjection(){
       mpBonus:S.mpBonus, gameOver:S.gameOver, launched:true, buzzed:S.buzzed||null });
   }
   go('projector');
-  // renderProj() inside go() builds the DOM, but video elements need a tick to exist
-  // before srcObject can be assigned. Re-render + rewire after a short delay.
   setTimeout(() => {
-    renderProj();          // rebuild DOM fresh
-    _rewireAllStreams();   // attach MediaStream objects to <video> elements
-    rtcEnsureReceiving(); // start WebRTC receive for remote cameras
+    renderProj();
+    _rewireAllStreams();
+    rtcEnsureReceiving();
   }, 150);
 }
 function endGame(){
@@ -2609,9 +2631,12 @@ function doImport(){
   if(!_importedQuestions.length){toast('Preview first to check questions','er');return;}
   const name=(document.getElementById('import-quiz-name').value||'').trim();
   if(!name){toast('Give this quiz a name','er');document.getElementById('import-quiz-name').focus();return;}
+  const modeVal=(document.querySelector('input[name="import-mode"]:checked')||{value:'single'}).value;
+  const mode    = modeVal==='single' ? 'single' : 'multi';
+  const submode = modeVal==='multi-fast' ? 'fast' : 'default';
   const quiz={
     id:uid(), emoji:'📥', title:name, category:'general', difficulty:'mixed',
-    status:'draft', desc:'Imported quiz', mode:'single', submode:'default',
+    status:'draft', desc:'Imported quiz', mode, submode,
     questions:_importedQuestions
   };
   S.quizzes.push(quiz);
@@ -2723,6 +2748,7 @@ function renderQL(){
       h+='<button class="qab qabd" title="Duplicate" onclick="dupQ(\''+q.id+'\')">⧉</button>';
       h+='<button class="qab" title="Print with answers" onclick="printQuiz(\''+q.id+'\')">🖨️</button>';
       h+=rlbtn;
+      h+='<button class="qab" title="Change mode" onclick="cycleMode(\''+q.id+'\')" style="font-size:11px">'+(q.mode==='multi'&&q.submode==='fast'?'⚡':q.mode==='multi'?'👥':'👤')+'</button>';
       h+='<button class="qab qabx" title="Delete" onclick="confDel(\''+q.id+'\')">🗑️</button>';
       h+='</div></div></div>';
     });
@@ -2730,6 +2756,27 @@ function renderQL(){
   document.getElementById('ap-quizzes').innerHTML=h;
 }
 function setQF(f){S.qf=f;renderQL();}
+
+// Cycle a quiz's mode: single → multi(default) → multi(fast) → single
+function cycleMode(id){
+  const q = S.quizzes.find(z => z.id === id);
+  if(!q) return;
+  if(q.mode !== 'multi'){
+    // single → multi default
+    q.mode = 'multi'; q.submode = 'default';
+    toast(q.emoji+' '+q.title+' → 👥 Multiplayer (Default)','ok');
+  } else if(q.submode !== 'fast'){
+    // multi default → multi fast
+    q.submode = 'fast';
+    toast(q.emoji+' '+q.title+' → ⚡ Multiplayer (Fast)','ok');
+  } else {
+    // multi fast → single
+    q.mode = 'single'; q.submode = 'default';
+    toast(q.emoji+' '+q.title+' → 👤 Single Player','ok');
+  }
+  persistQuizzes();
+  renderQL();
+}
 
 // ═══ QUIZ CRUD ═══
 function openCQ(){S.eqid=null;S.eqs=[];S.eqi=-2;document.getElementById('mqzt').textContent='CREATE QUIZ';renderQModal();openM('mqz');}
@@ -3406,6 +3453,22 @@ function renderSinglePlayerView(){
     // Quiz/question header
     h += '<div style="background:rgba(91,76,255,.08);border:1px solid rgba(91,76,255,.2);border-radius:10px;padding:7px 13px;font-family:Space Mono,monospace;font-size:10px;color:rgba(245,200,66,.7);letter-spacing:1px;flex-shrink:0">';
     h += '💰 '+(S.aq?x(S.aq.title.toUpperCase()):'QUIZ')+' — Q'+((S.curQ||0)+1)+' / '+(S.aq&&S.aq.questions?S.aq.questions.length:0)+'</div>';
+
+    // Lifelines — view-only display for the player (admin controls them on projector)
+    const ll = S.lifelines||{fifty:false,ask:false,skip:false,hiddenAnswers:[]};
+    const llIcon = (icon, label, used) => {
+      const op = used ? 'opacity:.25;filter:grayscale(1);' : 'opacity:.9;';
+      return '<div style="display:flex;flex-direction:column;align-items:center;gap:3px;'+op+'">'
+           + '<div style="width:40px;height:34px;border-radius:8px;border:1px solid rgba(255,255,255,'+(used?'.1':'.2')+');background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;font-size:'+(icon.length>2?'10px':'18px')+';font-weight:900;color:'+(used?'rgba(255,255,255,.3)':'var(--gold)')+'">'+icon+'</div>'
+           + '<div style="font-size:8px;color:rgba(255,255,255,.3);text-align:center;line-height:1.2">'+label+'</div>'
+           + '</div>';
+    };
+    h += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;padding:4px 0">';
+    h += '<span style="font-size:8px;color:rgba(255,255,255,.25);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;white-space:nowrap">Lifelines</span>';
+    h += llIcon('50%','50:50', ll.fifty);
+    h += llIcon('📞','Ask Anyone', ll.ask);
+    h += llIcon('⏭️','Skip', ll.skip);
+    h += '</div>';
 
     // Question text
     h += '<div style="background:rgba(0,0,0,.5);border:2px solid rgba(91,76,255,.35);border-radius:14px;padding:16px 18px;font-size:clamp(14px,2vw,20px);font-weight:600;line-height:1.55;color:#fff;flex-shrink:0">';
