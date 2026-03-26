@@ -2069,6 +2069,7 @@ async function requestCameraForPlayer(){ return null; }
 function _mediaEl(id, pname, styleExtra){
   const style = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000;' + (styleExtra||'');
   const stream = S.streams && S.streams[pname];
+  // VDO.Ninja feed — render iframe
   if(stream === 'vdo'){
     const viewUrl = typeof vdoViewUrl==='function' ? vdoViewUrl(pname) : '';
     if(viewUrl){
@@ -2078,27 +2079,6 @@ function _mediaEl(id, pname, styleExtra){
     }
   }
   return '<video id="'+id+'" data-player="'+x(pname)+'" autoplay playsinline muted style="'+style+'"></video>';
-}
-
-// Preserve a media element across renders — if it already exists with correct src/stream, reuse it
-function _preserveOrCreateMedia(id, pname, container){
-  const existing = document.getElementById(id);
-  const stream   = S.streams && S.streams[pname];
-  const viewUrl  = stream==='vdo' && typeof vdoViewUrl==='function' ? vdoViewUrl(pname) : '';
-
-  // If existing element matches what we need — detach, let caller reattach after innerHTML
-  if(existing){
-    if(stream === 'vdo' && existing.tagName==='IFRAME' && existing.src===viewUrl){
-      return existing; // caller will re-insert this node
-    }
-    if(stream instanceof MediaStream && existing.tagName==='VIDEO' && existing.srcObject===stream){
-      return existing;
-    }
-    if(!stream && existing.tagName==='VIDEO'){
-      return existing;
-    }
-  }
-  return null; // need to create fresh
 }
 
 // ── Re-wire all known streams to video elements after DOM rebuild ──
@@ -2247,58 +2227,12 @@ function _renderProjSingle(el, qd){
   const picked  = S.pickedAns;
   const revealed= picked!==null;
   const isOver  = S.gameOver;
-
-  // ── Preserve existing media element to prevent flicker/reload ──
-  const existingMedia = document.getElementById('proj-vid-main');
-  let mediaNode = null;
-  if(existingMedia){
-    const stream  = S.streams && S.streams[tp.name];
-    const viewUrl = stream==='vdo' && typeof vdoViewUrl==='function' ? vdoViewUrl(tp.name) : '';
-    const isMatch = (stream==='vdo' && existingMedia.tagName==='IFRAME' && existingMedia.src===viewUrl)
-                  ||(stream instanceof MediaStream && existingMedia.tagName==='VIDEO' && existingMedia.srcObject===stream)
-                  ||(!stream && existingMedia.tagName==='VIDEO');
-    if(isMatch) mediaNode = existingMedia.cloneNode(false); // shallow clone preserves src/srcObject
-    // Actually: detach the real node so we can reinsert it after innerHTML
-    if(isMatch) mediaNode = existingMedia; // reuse real node
-  }
-
   let h='';
-  // ── TOP: Camera feed (full width, above question) ──
-  // Container for media — if media already exists we'll re-insert after innerHTML
-  h+='<div id="proj-cam-wrap" style="position:absolute;top:0;left:0;right:0;height:42%;background:#000;overflow:hidden">';
-  if(!mediaNode){
-    // Fresh render: embed media element inline
-    const style='width:100%;height:100%;object-fit:cover;display:block;';
-    const stream = S.streams && S.streams[tp.name];
-    if(stream==='vdo'){
-      const viewUrl = typeof vdoViewUrl==='function' ? vdoViewUrl(tp.name) : '';
-      if(viewUrl) h+='<iframe id="proj-vid-main" data-player="'+x(tp.name)+'" src="'+viewUrl+'" allow="camera;microphone;autoplay;fullscreen" allowfullscreen style="'+style+'border:none;position:absolute;inset:0;width:100%;height:100%"></iframe>';
-      else        h+='<video id="proj-vid-main" data-player="'+x(tp.name)+'" autoplay playsinline muted style="position:absolute;inset:0;'+style+'"></video>';
-    } else {
-      h+='<video id="proj-vid-main" data-player="'+x(tp.name)+'" autoplay playsinline muted style="position:absolute;inset:0;'+style+'"></video>';
-    }
-  }
-  // Placeholder emoji shown before feed arrives
-  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(60px,8vw,120px);opacity:.5">'+tp.emoji+'</div>';
-  // LIVE badge over camera
-  h+='<div style="position:absolute;top:10px;left:12px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
-  // Contestant name chip over camera bottom-left
-  h+='<div style="position:absolute;bottom:10px;left:12px;z-index:20;background:rgba(0,0,0,.78);border:1px solid rgba(245,200,66,.35);border-radius:10px;padding:6px 12px;backdrop-filter:blur(10px)">';
-  h+='<div style="font-size:8px;color:rgba(255,255,255,.35);letter-spacing:1px;text-transform:uppercase;margin-bottom:1px">Contestant</div>';
-  h+='<div style="font-family:Bebas Neue,cursive;font-size:20px;color:var(--gold);letter-spacing:2px;line-height:1">'+x(tp.name)+'</div>';
-  h+='<div style="display:flex;align-items:center;gap:6px;margin-top:3px">';
-  h+='<span style="font-family:Space Mono,monospace;font-size:13px;color:var(--safe);font-weight:700">'+(tp.score||0)+' pts</span>';
-  if(S.ain&&!isOver){
-    h+='<input id="pts-inp-sp" type="number" min="1" value="10" style="width:38px;padding:2px 3px;border-radius:5px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.5);color:#fff;font-family:Space Mono,monospace;font-size:10px;font-weight:700;text-align:center;outline:none;margin-left:3px">';
-    h+='<button onclick="adjScoreInputSP(false)" style="width:20px;height:20px;border-radius:5px;border:1px solid rgba(231,76,60,.5);background:rgba(231,76,60,.2);color:#fff;font-size:12px;font-weight:900;cursor:pointer;line-height:1">−</button>';
-    h+='<button onclick="adjScoreInputSP(true)" style="width:20px;height:20px;border-radius:5px;border:1px solid rgba(46,204,113,.5);background:rgba(46,204,113,.2);color:#fff;font-size:12px;font-weight:900;cursor:pointer;line-height:1">+</button>';
-  }
-  h+='</div></div>';
-  h+='</div>'; // end cam-wrap
 
-  // ── BOTTOM AREA: question + ladder (below camera) ──
-  h+='<div style="position:absolute;top:42%;left:0;right:0;bottom:0;display:flex;gap:0;background:linear-gradient(to bottom,#0a0a14,#050508)">';
-  let h_rest = '';
+  // ── BG video ──
+  h+=_mediaEl('proj-vid-main', tp.name);
+  h+='<div id="proj-vid-ph" style="position:absolute;inset:0;z-index:2;background:linear-gradient(160deg,#151528,#0a0a12);display:flex;align-items:center;justify-content:center;font-size:clamp(80px,12vw,180px);opacity:.5">'+tp.emoji+'</div>';
+  h+='<div style="position:absolute;bottom:0;left:0;right:0;height:65%;z-index:3;background:linear-gradient(to top,rgba(0,0,0,.9),transparent);pointer-events:none"></div>';
 
   // ── LIVE badge ──
   h+='<div style="position:absolute;top:14px;left:14px;z-index:20;background:var(--danger);color:#fff;font-size:9px;font-family:Space Mono,monospace;padding:3px 10px;border-radius:20px;animation:pulse 2s infinite;letter-spacing:1px;font-weight:700">● LIVE</div>';
@@ -2321,44 +2255,61 @@ function _renderProjSingle(el, qd){
     const finalScore = tp.score||0;
     const ckpts=[100,50,0];
     const reached = ckpts.find(c=>finalScore>=c)||0;
-    h_rest+='<div style="position:absolute;inset:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;">';
-    h_rest+='<div style="text-align:center;max-width:480px;padding:30px 20px">';
-    h_rest+='<div style="font-size:72px;margin-bottom:12px">😔</div>';
-    h_rest+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(34px,6vw,60px);color:var(--danger);letter-spacing:4px;line-height:1;margin-bottom:8px">GAME OVER</div>';
-    h_rest+='<div style="font-size:14px;color:rgba(255,255,255,.5);margin-bottom:22px;line-height:1.6">'+x(tp.name)+' answered incorrectly.</div>';
+    // Show the wrong answer reveal still on the Q, then big overlay
+    h+='<div style="position:absolute;inset:0;z-index:40;background:rgba(0,0,0,.88);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;">';
+    h+='<div style="text-align:center;max-width:480px;padding:30px 20px">';
+    h+='<div style="font-size:72px;margin-bottom:12px">😔</div>';
+    h+='<div style="font-family:Bebas Neue,cursive;font-size:clamp(34px,6vw,60px);color:var(--danger);letter-spacing:4px;line-height:1;margin-bottom:8px">GAME OVER</div>';
+    h+='<div style="font-size:14px;color:rgba(255,255,255,.5);margin-bottom:22px;line-height:1.6">'+x(tp.name)+' answered incorrectly.</div>';
+    // Checkpoint info
     if(finalScore===0&&reached===0){
-      h_rest+='<div style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
-      h_rest+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">No checkpoint reached</div>';
-      h_rest+='<div style="font-family:Bebas Neue,cursive;font-size:38px;color:var(--danger);letter-spacing:2px">0 pts</div>';
-      h_rest+='</div>';
+      h+='<div style="background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
+      h+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">No checkpoint reached</div>';
+      h+='<div style="font-family:Bebas Neue,cursive;font-size:38px;color:var(--danger);letter-spacing:2px">0 pts</div>';
+      h+='</div>';
     } else {
-      h_rest+='<div style="background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
-      h_rest+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">🛡 Protected by checkpoint</div>';
-      h_rest+='<div style="font-family:Bebas Neue,cursive;font-size:38px;color:var(--safe);letter-spacing:2px">'+finalScore+' pts</div>';
-      h_rest+='<div style="font-size:12px;color:rgba(255,255,255,.4);margin-top:3px">Fell back to '+finalScore+' pt floor</div>';
-      h_rest+='</div>';
+      h+='<div style="background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.35);border-radius:14px;padding:16px 22px;margin-bottom:20px">';
+      h+='<div style="font-size:11px;color:rgba(255,255,255,.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px">🛡 Protected by checkpoint</div>';
+      h+='<div style="font-family:Bebas Neue,cursive;font-size:38px;color:var(--safe);letter-spacing:2px">'+finalScore+' pts</div>';
+      h+='<div style="font-size:12px;color:rgba(255,255,255,.4);margin-top:3px">Fell back to '+finalScore+' pt floor</div>';
+      h+='</div>';
     }
     if(S.ain){
-      h_rest+='<button onclick="endGame()" style="padding:13px 36px;border-radius:12px;background:var(--accent);border:none;color:#fff;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.5px">End Game</button>';
+      h+='<button onclick="endGame()" style="padding:13px 36px;border-radius:12px;background:var(--accent);border:none;color:#fff;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.5px">End Game</button>';
     }
-    h_rest+='</div></div>';
-    h += h_rest + '</div>';
-    el.innerHTML = h;
-    // Re-insert preserved media node
-    if(mediaNode){ const wrap=document.getElementById('proj-cam-wrap'); if(wrap&&!document.getElementById('proj-vid-main')){ mediaNode.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:none'; wrap.insertBefore(mediaNode,wrap.firstChild); } }
-    else _attachMedia('proj-vid-main', tp.name);
+    h+='</div></div>';
+    // Still render the question behind the overlay so they can see the answer
+    h+='<div style="position:absolute;bottom:16px;left:14px;right:216px;z-index:30;opacity:.55;pointer-events:none">';
+    h+='<div style="background:rgba(0,0,0,.95);border:2px solid rgba(231,76,60,.4);border-radius:16px;padding:14px 18px">';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">';
+    if(qd) qd.answers.forEach((a,i)=>{
+      const isCrct=i===qd.correct, isPk=i===picked, isWrg=isPk&&!isCrct;
+      const bg=isCrct?'rgba(46,204,113,.25)':isWrg?'rgba(231,76,60,.22)':'rgba(255,255,255,.04)';
+      const bdr=isCrct?'rgba(46,204,113,.8)':isWrg?'rgba(231,76,60,.8)':'rgba(255,255,255,.08)';
+      h+='<div style="background:'+bg+';border:2px solid '+bdr+';border-radius:9px;padding:7px 10px;display:flex;align-items:center;gap:7px">';
+      h+='<div style="width:22px;height:22px;border-radius:5px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:13px;color:var(--gold);flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:11px;color:'+(isCrct?'var(--safe)':isWrg?'var(--danger)':'rgba(255,255,255,.3)')+';font-weight:500;flex:1">'+x(a)+'</div>';
+      if(isCrct) h+='<span style="font-size:12px">✅</span>';
+      if(isWrg)  h+='<span style="font-size:12px">❌</span>';
+      h+='</div>';
+    });
+    h+='</div></div></div>';
+
+    el.innerHTML=h;
+    _attachMedia('proj-vid-main', tp.name);
     return;
   }
 
-  // ── RIGHT SIDE: Ladder ──
+  // ── RIGHT SIDE: Ladder — 0 at bottom, +10 per correct answer ──
+  // 16 rungs: 0,10,20…150. Highlighted rung = player's current score.
+  // Safety checkpoints at 50 and 100.
   const ladderSteps=[0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
   const sf=[50,100];
   const currentScore = tp.score||0;
-  const displaySteps=[...ladderSteps].reverse();
-  // Ladder panel — right side of bottom area
-  h_rest+='<div style="width:min(180px,16vw);flex-shrink:0;background:rgba(0,0,0,.88);border-left:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;overflow:hidden">';
-  h_rest+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
-  h_rest+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 6px 4px">'; 
+  const displaySteps=[...ladderSteps].reverse(); // top of DOM = highest value
+  h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden">';
+  h+='<div style="font-family:Bebas Neue,cursive;font-size:11px;letter-spacing:3px;color:var(--gold);text-align:center;padding:6px 0 5px;flex-shrink:0;border-bottom:1px solid rgba(255,255,255,.07)">LADDER</div>';
+  h+='<div style="flex:1;display:flex;flex-direction:column;overflow:hidden;padding:3px 6px 4px">';
   displaySteps.forEach(v=>{
     const isCur  = v===currentScore;
     const isPast = v < currentScore;
@@ -2374,23 +2325,23 @@ function _renderProjSingle(el, qd){
                : isSafe ? 'color:var(--safe);'
                : 'color:rgba(255,255,255,.32);';
     const icon = isCur ? '▶' : isPast ? '✓' : isSafe ? '🛡' : '';
-    h_rest+='<div style="display:flex;align-items:center;padding:0 5px;border-radius:5px;flex:1;min-height:16px;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:11px;font-weight:700;">';
-    h_rest+='<span style="width:18px;text-align:center;flex-shrink:0;font-size:11px">'+icon+'</span>';
-    h_rest+='<span style="flex:1;padding:0 3px;font-size:11px;font-weight:700">'+v+' pts</span>';
-    if(isSafe&&!isPast) h_rest+='<span style="font-size:10px;font-weight:700;color:var(--safe);opacity:.85">SAFE</span>';
-    h_rest+='</div>';
+    h+='<div style="display:flex;align-items:center;padding:0 5px;border-radius:5px;flex:1;min-height:16px;'+bg+bdr+col+'font-family:Space Mono,monospace;font-size:11px;font-weight:700;">';
+    h+='<span style="width:18px;text-align:center;flex-shrink:0;font-size:11px">'+icon+'</span>';
+    h+='<span style="flex:1;padding:0 3px;font-size:11px;font-weight:700">'+v+' pts</span>';
+    if(isSafe&&!isPast) h+='<span style="font-size:10px;font-weight:700;color:var(--safe);opacity:.85">SAFE</span>';
+    h+='</div>';
   });
-  h_rest+='</div></div>';
+  h+='</div></div>';
 
-  // ── LEFT: Question card ──
-  h_rest+='<div style="flex:1;display:flex;flex-direction:column;padding:12px 14px;overflow-y:auto">';
-  h_rest+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:14px;padding:13px 16px;backdrop-filter:blur(14px);flex:1">';
+  // ── BOTTOM: Question card (left of ladder) ──
+  h+='<div style="position:absolute;bottom:14px;left:14px;right:max(216px,calc(18vw + 16px));z-index:20">';
+  h+='<div style="background:rgba(0,0,0,.92);border:2px solid rgba(91,76,255,.48);border-radius:16px;padding:14px 18px;backdrop-filter:blur(14px)">';
 
   // Quiz title bar
-  h_rest+='<div style="font-family:Space Mono,monospace;color:rgba(245,200,66,.65);font-size:9px;margin-bottom:8px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
+  h+='<div style="font-family:Space Mono,monospace;color:rgba(245,200,66,.65);font-size:9px;margin-bottom:8px;letter-spacing:2px">💰 '+x(S.aq.title.toUpperCase())+' — Q'+(1+(S.curQ||0))+' / '+(S.aq.questions?S.aq.questions.length:0)+'</div>';
 
   if(S.paused){
-    h_rest+='<div style="font-size:clamp(18px,2vw,24px);font-weight:700;color:var(--warn);text-align:center;padding:14px 0;letter-spacing:3px">⏸ PAUSED</div>';
+    h+='<div style="font-size:clamp(18px,2vw,24px);font-weight:700;color:var(--warn);text-align:center;padding:14px 0;letter-spacing:3px">⏸ PAUSED</div>';
   } else {
 
     // ── LIFELINES — ghost/transparent, floating above question ──
@@ -2413,18 +2364,20 @@ function _renderProjSingle(el, qd){
         +s+'display:flex;align-items:center;justify-content:center;transition:all .25s;backdrop-filter:blur(4px);">'
         +icon+'</button>';
     };
-    h_rest+='<div style="display:flex;gap:5px;align-items:center;margin-bottom:10px">';
-    h_rest+='<span style="font-size:8px;color:rgba(255,255,255,.28);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-right:3px">Lifelines</span>';
-    h_rest+=llBtn('50%','50:50 — Remove two wrong answers', ll.fifty,'useFiftyFifty');
-    h_rest+=llBtn('📞','Ask Anyone — Consult someone',      ll.ask,  'useAskAnyone');
-    h_rest+=llBtn('⏭️','Skip — Pass this question',         ll.skip, 'useSkip');
-    h_rest+='</div>';
+    h+='<div style="display:flex;gap:5px;align-items:center;margin-bottom:10px">';
+    h+='<span style="font-size:8px;color:rgba(255,255,255,.28);letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;margin-right:3px">Lifelines</span>';
+    h+=llBtn('50%','50:50 — Remove two wrong answers', ll.fifty,'useFiftyFifty');
+    h+=llBtn('📞','Ask Anyone — Consult someone',      ll.ask,  'useAskAnyone');
+    h+=llBtn('⏭️','Skip — Pass this question',         ll.skip, 'useSkip');
+    h+='</div>';
 
     // Question text
-    h_rest+='<div style="font-size:clamp(11px,1.5vw,18px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:10px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
+    h+='<div style="font-size:clamp(11px,1.3vw,17px);font-weight:600;line-height:1.5;color:#fff;margin-bottom:10px">'+(qd?x(qd.text):'Waiting for question…')+'</div>';
 
+    // Answers grid — 2×2
+    // Admin clicks to pick the answer; others see result only
     const isAdminHere = S.ain || localStorage.getItem('qs_admin')==='1';
-    h_rest+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:7px">';
     (qd?qd.answers:['A','B','C','D']).forEach((a,i)=>{
       const isHidden  = hidden.includes(i) && !revealed;
       const isCorrect = qd && i===qd.correct;
@@ -2444,40 +2397,29 @@ function _renderProjSingle(el, qd){
       const tag = canClick ? 'button' : 'div';
       const clickAttr = canClick ? 'onclick="projPickAnswer('+i+')"' : '';
       const cursorStyle = canClick ? 'cursor:pointer;' : 'cursor:default;';
-      h_rest+='<'+tag+' '+clickAttr+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:10px;padding:8px 11px;display:flex;align-items:center;gap:7px;transition:all .3s;width:100%;text-align:left;'+cursorStyle+shadow+'">';
-      h_rest+='<div style="width:24px;height:24px;border-radius:5px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
-      h_rest+='<div style="font-size:11px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
-      if(isCorrect&&revealed) h_rest+='<span style="font-size:13px">✅</span>';
-      if(isWrong)             h_rest+='<span style="font-size:13px">❌</span>';
-      h_rest+='</'+tag+'>';
+      h+='<'+tag+' '+clickAttr+' style="background:'+bg+';border:2px solid '+bdr+';border-radius:10px;padding:8px 11px;display:flex;align-items:center;gap:7px;transition:all .3s;width:100%;text-align:left;'+cursorStyle+shadow+'">';
+      h+='<div style="width:24px;height:24px;border-radius:5px;background:'+lBg+';display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,cursive;font-size:14px;color:'+lCol+';flex-shrink:0">'+['A','B','C','D'][i]+'</div>';
+      h+='<div style="font-size:11px;color:'+col+';font-weight:500;flex:1">'+(isHidden?'':x(a))+'</div>';
+      if(isCorrect&&revealed) h+='<span style="font-size:13px">✅</span>';
+      if(isWrong)             h+='<span style="font-size:13px">❌</span>';
+      h+='</'+tag+'>';
     });
-    h_rest+='</div>';
+    h+='</div>';
 
+    // Post-answer controls (correct path only — wrong triggers game-over overlay above)
     if(revealed && S.ain && !isOver){
       const isLastQ=(S.curQ||0)>=(S.aq.questions?S.aq.questions.length-1:0);
       if(!isLastQ){
-        h_rest+='<div style="margin-top:9px;text-align:center"><button onclick="projNextQuestion()" style="padding:7px 22px;border-radius:9px;background:var(--accent);border:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer">▶ Next Question</button></div>';
+        h+='<div style="margin-top:9px;text-align:center"><button onclick="projNextQuestion()" style="padding:7px 22px;border-radius:9px;background:var(--accent);border:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer">▶ Next Question</button></div>';
       } else {
-        h_rest+='<div style="margin-top:9px;text-align:center;font-family:Space Mono,monospace;font-size:11px;color:var(--gold);letter-spacing:1px">🏁 Quiz Complete!</div>';
+        h+='<div style="margin-top:9px;text-align:center;font-family:Space Mono,monospace;font-size:11px;color:var(--gold);letter-spacing:1px">🏁 Quiz Complete!</div>';
       }
     }
   }
 
-  h_rest+='</div></div>'; // close question card + left panel
-  h += h_rest + '</div>'; // close bottom flex area
-
-  el.innerHTML = h;
-  // Re-insert preserved media node to prevent flicker
-  if(mediaNode){
-    const wrap = document.getElementById('proj-cam-wrap');
-    if(wrap && !document.getElementById('proj-vid-main')){
-      mediaNode.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border:none';
-      wrap.insertBefore(mediaNode, wrap.firstChild);
-    }
-  } else {
-    _attachMedia('proj-vid-main', tp.name);
-  }
-  _rewireAllStreams();
+  h+='</div></div>';
+  el.innerHTML=h;
+  _attachMedia('proj-vid-main', tp.name);
 }
 
 // ── MULTIPLAYER projection ──
@@ -2486,8 +2428,8 @@ function _renderProjMulti(el, qd){
   const shown=S.players.slice(0,4);
   let h='';
 
-  // 4 equal vertical columns
-  h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr;z-index:1">';
+  // 4-quadrant grid
+  h+='<div style="position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;z-index:1">';
   shown.forEach((p,i)=>{
     const score=p.score||0;
     const bdr=i===0?'2px solid rgba(245,200,66,.4)':'1px solid rgba(255,255,255,.08)';
@@ -2579,35 +2521,9 @@ function _renderProjMulti(el, qd){
     h+='</div></div>';
   }
 
-  // Preserve existing VDO iframes before innerHTML wipes them
-  const _savedMedia = {};
-  shown.forEach((p,i)=>{
-    const existing = document.getElementById('proj-vid-'+i);
-    if(existing && existing.tagName==='IFRAME'){
-      _savedMedia[i] = existing;
-    }
-  });
-
   el.innerHTML=h;
-
-  // Re-insert preserved iframes + wire new video elements
-  shown.forEach((p,i)=>{
-    if(_savedMedia[i]){
-      const slot = document.getElementById('proj-vid-'+i);
-      if(slot){
-        // Replace placeholder video with preserved iframe
-        const st = _savedMedia[i].style;
-        st.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;background:#000;border:none';
-        _savedMedia[i].id = 'proj-vid-'+i;
-        _savedMedia[i].setAttribute('data-player', p.name);
-        slot.parentNode.replaceChild(_savedMedia[i], slot);
-      }
-    } else {
-      _attachMedia('proj-vid-'+i, p.name);
-    }
-  });
-  if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr 1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
-  _rewireAllStreams();
+  shown.forEach((p,i)=>{ _attachMedia('proj-vid-'+i, p.name); });
+  if(typeof isFast==='function'&&isFast()&&S.buzzed){const grid=el.querySelector('div[style*="grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr"]');shown.forEach((p,i)=>{if(!grid||!grid.children[i])return;if(p.name===S.buzzed){grid.children[i].classList.add('fast-winner-quad');const b=document.createElement('div');b.style.cssText='position:absolute;bottom:12px;left:12px;z-index:40;background:rgba(46,204,113,.9);color:#000;font-size:10px;font-family:Space Mono,monospace;padding:4px 12px;border-radius:20px;font-weight:700';b.textContent='BUZZED IN';grid.children[i].appendChild(b);}});if(S.ain){const nb=document.createElement('div');nb.style.cssText='position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:60';nb.innerHTML='<button onclick="fastNextQuestion()" style="padding:9px 24px;border-radius:10px;background:var(--accent);border:none;color:#fff;font-size:13px;font-weight:700;cursor:pointer">Next Question</button>';el.appendChild(nb);}}
 }
 
 
