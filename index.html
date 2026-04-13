@@ -772,7 +772,7 @@ let S={
   ain:false, gon:false, gc:null, aq:null,
   players:[], me:null, playerCode:null,
   quizzes:[], eqid:null, eqs:[], eqi:-1, qf:'all',
-  curQ:0, paused:false, revealAns:false, curStep:10,
+  curQ:0, paused:false, revealAns:false, curStep:3,
   pickedAns:null,         // 0-3 answer index admin clicked, null = none yet
   gameOver:false,         // true = wrong answer — show game-over screen
   lifelines:{             // per-game lifeline state (reset on new game/question-skip)
@@ -813,7 +813,7 @@ function initFirebaseSync() {
       // Game ended or never started
       if (S.gon) {
         S.gon=false; S.gc=null; S.aq=null;
-        S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=10;
+        S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=3;
         // If player was in lobby/game, show them the "no game" state
         if (!S.ain) {
           document.getElementById('tlobby').disabled=true;
@@ -831,7 +831,7 @@ function initFirebaseSync() {
     S.curQ     = gameData.curQ   || 0;
     S.paused   = gameData.paused || false;
     S.revealAns= gameData.revealAns || false;
-    S.curStep  = gameData.curStep || 10;
+    S.curStep  = gameData.curStep || 3;
     S.pickedAns= (gameData.pickedAns !== undefined) ? gameData.pickedAns : null;
     S.lifelines = gameData.lifelines
       ? { fifty:!!gameData.lifelines.fifty, ask:!!gameData.lifelines.ask, skip:!!gameData.lifelines.skip, hiddenAnswers:gameData.lifelines.hiddenAnswers||[] }
@@ -1087,11 +1087,11 @@ function releaseGame(){
   const q=S.quizzes.find(z=>z.id===sel.value);
   if(!q)return;
   S.gon=true; S.gc=mkc(); S.aq=q; S.players=[];
-  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=10; S.pickedAns=null;
+  S.curQ=0; S.paused=false; S.revealAns=false; S.curStep=3; S.pickedAns=null;
   S.lifelines={fifty:false,ask:false,skip:false,hiddenAnswers:[]}; S.mpBonus=false; S.gameOver=false;
   // Write full quiz into Firebase so player devices (which have no quiz data) can load it
   const gameData={
-    gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:10, status:'active',
+    gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:3, status:'active',
     lifelines:{fifty:false,ask:false,skip:false,hiddenAnswers:[]},
     mpBonus:false, gameOver:false, buzzed:null, launched:false,
     quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
@@ -2398,8 +2398,8 @@ function _renderProjSingleOverlay(overlay, qd){
   }
 
   // ── RIGHT SIDE: Ladder ──
-  const ladderSteps=[0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
-  const sf=[50,100];
+  const ladderSteps=[0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45];
+  const sf=[15,30];
   const currentScore = tp.score||0;
   const displaySteps=[...ladderSteps].reverse();
   h+='<div style="position:absolute;top:10px;right:10px;bottom:2px;width:min(200px,18vw);z-index:20;background:rgba(0,0,0,.88);border:1px solid rgba(255,255,255,.1);border-radius:14px;backdrop-filter:blur(10px);display:flex;flex-direction:column;overflow:hidden;pointer-events:none">';
@@ -2982,7 +2982,7 @@ function relFromLib(id){
   // Clear streams so camera devices show 'No feed'
   S.streams={};
   const gameData={
-    gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:10, status:'active',
+    gc:S.gc, curQ:0, paused:false, revealAns:false, curStep:3, status:'active',
     lifelines:{fifty:false,ask:false,skip:false,hiddenAnswers:[]},
     mpBonus:false, gameOver:false, buzzed:null, launched:false,
     quiz:{ id:q.id, title:q.title, emoji:q.emoji, category:q.category,
@@ -3097,11 +3097,11 @@ function renderSession(){
 }
 // ── Admin clicks an answer on the projection (single player mode) ──
 // ─── Checkpoint system ───
-// Safety checkpoints at 50 and 100 pts (like Millionaire £1k / £32k floors).
+// Safety checkpoints at 15 and 30 pts (5 and 10 correct answers).
 // If a player answers wrong their score drops to the highest checkpoint they passed.
 function _applyCheckpoint(currentScore){
-  if(currentScore >= 100) return 100;
-  if(currentScore >= 50)  return 50;
+  if(currentScore >= 30) return 30;
+  if(currentScore >= 15) return 15;
   return 0;
 }
 
@@ -3118,7 +3118,7 @@ function projPickAnswer(idx){
   const isCorrect = idx === qd.correct;
 
   if(isCorrect){
-    const pts = 10; // always +10 per correct answer; ladder tracks by score
+    const pts = 3; // 3 marks per correct answer; ladder tracks by score
     if(S.players[0]){
       S.players[0].score = (S.players[0].score||0) + pts;
       if(window._fb&&window._fb.ready())
@@ -3167,7 +3167,7 @@ function projNextQuestion(){
     S.revealAns = false;
     S.mpBonus   = false;
     if(S.lifelines) S.lifelines.hiddenAnswers = [];
-    const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
+    const steps=[3,6,9,12,15,18,21,24,27,30,33,36,39,42,45];
     S.curStep = steps[S.curQ] || steps[steps.length-1];
     if(window._fb&&window._fb.ready())
       window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null, lifelines:S.lifelines, mpBonus:false });
@@ -3185,7 +3185,7 @@ function sessionNext(){
   const totalQ=S.aq.questions?S.aq.questions.length:0;
   if(S.curQ<totalQ-1){S.curQ++;S.revealAns=false;S.pickedAns=null;S.mpBonus=false;if(S.lifelines)S.lifelines.hiddenAnswers=[];}
   else{toast('Last question reached.','nf');return;}
-  const steps=[10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
+  const steps=[3,6,9,12,15,18,21,24,27,30,33,36,39,42,45];
   S.curStep=steps[S.curQ]||steps[steps.length-1];
   if(window._fb&&window._fb.ready()) window._fb.pushGame({ gc:S.gc, quiz:S.aq, curQ:S.curQ, paused:S.paused, revealAns:false, curStep:S.curStep, status:'active', pickedAns:null });
   renderSession();renderProj();updateFloatBar();
@@ -3471,8 +3471,8 @@ function renderSinglePlayerView(){
   const isOver = S.gameOver;
 
   // Ladder steps
-  const ladderSteps = [0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150];
-  const sf = [50,100];
+  const ladderSteps = [0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45];
+  const sf = [15,30];
   const displaySteps = [...ladderSteps].reverse();
 
   let h = '<div style="min-height:calc(100vh - 58px);background:linear-gradient(160deg,#07070f,#0d0c1e);display:flex;gap:0;overflow-y:auto;overflow-x:hidden">';
@@ -4048,7 +4048,7 @@ function renderLobby(){
             S.curQ = gameData.curQ || 0;
             S.paused = gameData.paused || false;
             S.revealAns = gameData.revealAns || false;
-            S.curStep = gameData.curStep || 10;
+            S.curStep = gameData.curStep || 3;
             if(gameData.quiz){ S.aq = gameData.quiz; }
             else if(gameData.aqId){
               const found = S.quizzes.find(q => q.id === gameData.aqId);
